@@ -23,7 +23,7 @@ use routing::{
 };
 use std::collections::BTreeMap;
 
-pub const LOWERED_ELDER_SIZE: usize = 3;
+pub const LOWERED_ELDER_SIZE: usize = 4;
 
 // -----  Miscellaneous tests below  -----
 
