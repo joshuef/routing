@@ -38,7 +38,7 @@ pub(crate) enum Variant {
         nonce: MessageHash,
     },
     /// User-facing message
-    UserMessage(Vec<u8>),
+    UserMessage(Bytes),
     /// Message sent to newly joined node containing the necessary info to become a member of our
     /// section.
     NodeApproval(EldersUpdate),

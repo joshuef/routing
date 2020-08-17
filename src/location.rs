@@ -7,6 +7,7 @@
 // permissions and limitations relating to use of the SAFE Network Software.
 
 use crate::error::{Result, RoutingError};
+use std::net::SocketAddr;
 use xor_name::{Prefix, XorName};
 
 /// Message source location.
@@ -17,6 +18,8 @@ pub enum SrcLocation {
     Node(XorName),
     /// A section with the given prefix.
     Section(Prefix),
+    /// A client with the given address
+    Client(SocketAddr),
 }
 
 impl SrcLocation {
@@ -24,7 +27,7 @@ impl SrcLocation {
     pub fn is_section(&self) -> bool {
         match self {
             Self::Section(_) => true,
-            Self::Node(_) => false,
+            Self::Node(_) | Self::Client(_) => false,
         }
     }
 
@@ -33,6 +36,7 @@ impl SrcLocation {
         match self {
             SrcLocation::Node(self_name) => name == self_name,
             SrcLocation::Section(self_prefix) => self_prefix.matches(name),
+            SrcLocation::Client(_) => false,
         }
     }
 
@@ -41,6 +45,7 @@ impl SrcLocation {
         match self {
             Self::Node(name) => DstLocation::Node(*name),
             Self::Section(prefix) => DstLocation::Section(prefix.name()),
+            Self::Client(addr) => DstLocation::Client(*addr),
         }
     }
 }
@@ -54,6 +59,8 @@ pub enum DstLocation {
     Section(XorName),
     /// Destination is the node at the `ConnectionInfo` the message is directly sent to.
     Direct,
+    /// A client with the given address
+    Client(SocketAddr),
 }
 
 impl DstLocation {
@@ -61,7 +68,7 @@ impl DstLocation {
     pub fn is_section(&self) -> bool {
         match self {
             Self::Section(_) => true,
-            Self::Node(_) | Self::Direct => false,
+            Self::Node(_) | Self::Direct | Self::Client(_) => false,
         }
     }
 
@@ -69,7 +76,7 @@ impl DstLocation {
     pub(crate) fn as_node(&self) -> Result<&XorName> {
         match self {
             Self::Node(name) => Ok(name),
-            Self::Section(_) | Self::Direct => Err(RoutingError::BadLocation),
+            Self::Section(_) | Self::Direct | Self::Client(_) => Err(RoutingError::BadLocation),
         }
     }
 
@@ -77,7 +84,7 @@ impl DstLocation {
     pub(crate) fn check_is_section(&self) -> Result<()> {
         match self {
             Self::Section(_) => Ok(()),
-            Self::Node(_) | Self::Direct => Err(RoutingError::BadLocation),
+            Self::Node(_) | Self::Direct | Self::Client(_) => Err(RoutingError::BadLocation),
         }
     }
 
@@ -93,6 +100,7 @@ impl DstLocation {
             Self::Node(self_name) => name == self_name,
             Self::Section(self_name) => prefix.matches(self_name),
             Self::Direct => true,
+            Self::Client(_) => false,
         }
     }
 
@@ -101,7 +109,7 @@ impl DstLocation {
         match self {
             Self::Node(name) => Some(name),
             Self::Section(name) => Some(name),
-            Self::Direct => None,
+            Self::Direct | Self::Client(_) => None,
         }
     }
 }

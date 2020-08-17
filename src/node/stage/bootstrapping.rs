@@ -55,11 +55,11 @@ impl Bootstrapping {
             return;
         }
 
-        core.transport.disconnect(peer_addr);
+        //TODO?? core.transport.disconnect(peer_addr);
 
         if self.pending_requests.is_empty() {
             // Rebootstrap
-            core.transport.bootstrap();
+            //TODO??  core.transport.bootstrap();
         }
     }
 
@@ -108,7 +108,7 @@ impl Bootstrapping {
                 "Ignoring BootstrapResponse from unexpected peer: {}",
                 sender,
             );
-            core.transport.disconnect(*sender.peer_addr());
+            //TODO?? core.transport.disconnect(*sender.peer_addr());
             return Ok(None);
         }
 
@@ -159,9 +159,10 @@ impl Bootstrapping {
     }
 
     fn reconnect_to_new_section(&mut self, core: &mut Core, new_conn_infos: Vec<SocketAddr>) {
-        for addr in self.pending_requests.drain() {
+        // TODO???
+        /*for addr in self.pending_requests.drain() {
             core.transport.disconnect(addr);
-        }
+        }*/
 
         self.timeout_tokens.clear();
 

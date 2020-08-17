@@ -8,6 +8,7 @@
 
 use crate::location::{DstLocation, SrcLocation};
 
+use bytes::Bytes;
 use hex_fmt::HexFmt;
 use std::{
     collections::BTreeSet,
@@ -40,7 +41,7 @@ pub enum Event {
     /// Received a message.
     MessageReceived {
         /// The content of the message.
-        content: Vec<u8>,
+        content: Bytes,
         /// The source location that sent the message.
         src: SrcLocation,
         /// The destination location that receives the message.
