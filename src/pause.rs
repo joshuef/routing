@@ -13,10 +13,7 @@ use crate::{
     messages::{MessageAccumulator, QueuedMessage},
     network_params::NetworkParams,
     section::{SectionKeysProvider, SectionUpdateBarrier, SharedState},
-    transport::Transport,
-    TransportEvent,
 };
-use crossbeam_channel as mpmc;
 use std::collections::VecDeque;
 
 /// A type that wraps the internal state of a node while it is paused in order to be upgraded and/or
@@ -36,8 +33,6 @@ pub struct PausedState {
     pub(super) msg_filter: MessageFilter,
     pub(super) msg_queue: VecDeque<QueuedMessage>,
     // TODO: instead of storing both transport and network_rx, store only the network config.
-    pub(super) transport: Transport,
-    pub(super) transport_rx: Option<mpmc::Receiver<TransportEvent>>,
     pub(super) msg_accumulator: MessageAccumulator,
     pub(super) vote_accumulator: VoteAccumulator,
     pub(super) section_update_barrier: SectionUpdateBarrier,

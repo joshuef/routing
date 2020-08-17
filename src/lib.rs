@@ -26,7 +26,7 @@
 )]
 // For explanation of lint checks, run `rustc -W help` or see
 // https://github.com/maidsafe/QA/blob/master/Documentation/Rust%20Lint%20Checks.md
-#![forbid(
+/*#![forbid(
     arithmetic_overflow,
     mutable_transmutes,
     no_mangle_const_items,
@@ -65,7 +65,7 @@
 )]
 // Need this to stop clippy complaining about the `use quic_p2p` line which is actually necessary.
 #![allow(clippy::single_component_path_imports)]
-
+*/
 #[macro_use]
 extern crate serde;
 
@@ -86,7 +86,6 @@ pub use self::{
     node::{Node, NodeConfig},
     pause::PausedState,
     quic_p2p::Config as TransportConfig,
-    quic_p2p::Event as TransportEvent,
     section::SectionProofChain,
 };
 
@@ -147,7 +146,6 @@ mod rng;
 mod section;
 mod time;
 mod timer;
-mod transport;
 
 // Cryptography
 mod crypto;

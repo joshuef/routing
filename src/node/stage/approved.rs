@@ -32,7 +32,6 @@ use crate::{
 };
 use bls_dkg::key_gen::message::Message as DkgMessage;
 use bytes::Bytes;
-use crossbeam_channel::Sender;
 use itertools::Itertools;
 use rand::Rng;
 use serde::Serialize;
@@ -64,7 +63,7 @@ pub(crate) struct Approved {
 impl Approved {
     // Create the approved stage for the first node in the network.
     pub fn first(core: &mut Core) -> Result<Self> {
-        let connection_info = core.transport.our_connection_info()?;
+        let connection_info = core.our_connection_info()?;
         let p2p_node = P2pNode::new(*core.id(), connection_info);
 
         let secret_key_set = consensus::generate_secret_key_set(&mut core.rng, 1);
@@ -131,8 +130,6 @@ impl Approved {
             full_id: core.full_id,
             msg_filter: core.msg_filter,
             msg_queue: core.msg_queue,
-            transport: core.transport,
-            transport_rx: None,
             msg_accumulator: self.message_accumulator,
             vote_accumulator: self.vote_accumulator,
             section_update_barrier: self.section_update_barrier,
@@ -140,33 +137,27 @@ impl Approved {
     }
 
     // Create the approved stage by resuming a paused node.
-    pub fn resume(
-        state: PausedState,
-        timer_tx: Sender<u64>,
-        user_event_tx: Sender<Event>,
-    ) -> (Self, Core) {
-        let core = Core::resume(
-            state.network_params,
-            state.full_id,
-            state.transport,
-            state.msg_filter,
-            state.msg_queue,
-            timer_tx,
-            user_event_tx,
-        );
+    /*    pub fn resume(
+            state: PausedState,
+            timer_tx: Sender<u64>,
+            user_event_tx: Sender<Event>,
+        ) -> (Self, Core) {
+            let core = Core::resume(
+                state.network_params,
+                state.full_id,
+                state.transport,
+                state.msg_filter,
+                state.msg_queue,
+                timer_tx,
+                user_event_tx,
+            );
 
-        let is_self_elder = state
-            .shared_state
-            .sections
-            .our()
-            .elders
-            .contains_key(core.name());
-
-        let gossip_timer_token = if is_self_elder {
-            Some(core.timer.schedule(state.consensus_engine.gossip_period()))
-        } else {
-            None
-        };
+            let is_self_elder = state
+                .shared_state
+                .sections
+                .our()
+                .elders
+                .contains_key(core.name());
 
         let stage = Self {
             consensus_engine: state.consensus_engine,
@@ -182,9 +173,24 @@ impl Approved {
             dkg_voter: Default::default(),
         };
 
-        (stage, core)
-    }
+            let stage = Self {
+                consensus_engine: state.consensus_engine,
+                shared_state: state.shared_state,
+                section_keys_provider: state.section_keys_provider,
+                message_accumulator: state.msg_accumulator,
+                vote_accumulator: state.vote_accumulator,
+                gossip_timer_token,
+                section_update_barrier: state.section_update_barrier,
+                // TODO: these fields should come from PausedState too
+                churn_in_progress: false,
+                members_changed: false,
+                dkg_voter: Default::default(),
+                bounced_unknown_messages: Default::default(),
+            };
 
+            (stage, core)
+        }
+    */
     // Cast a vote for totally ordered event via parsec.
     pub fn cast_ordered_vote(&mut self, event: AccumulatingEvent) {
         match self
@@ -299,7 +305,7 @@ impl Approved {
         }
     }
 
-    pub fn handle_timeout(&mut self, core: &mut Core, token: u64) {
+    pub async fn handle_timeout(&mut self, core: &mut Core, token: u64) -> Result<()> {
         if self.gossip_timer_token == Some(token) {
             if self.is_our_elder(core.id()) {
                 self.gossip_timer_token =
@@ -311,6 +317,8 @@ impl Approved {
                 .set_timer_token(core.timer.schedule(DKG_PROGRESS_INTERVAL));
             self.progress_dkg(core);
         }
+
+        Ok(())
     }
 
     fn check_dkg(&mut self, core: &mut Core) {
@@ -350,10 +358,10 @@ impl Approved {
         self.check_dkg(core);
     }
 
-    pub fn finish_handle_input(&mut self, core: &mut Core) {
+    pub async fn finish_handle_input(&mut self, core: &mut Core) {
         if self.shared_state.our_info().elders.len() == 1 {
             // If we're the only node then invoke poll_all directly
-            if let Err(error) = self.poll_all(core) {
+            if let Err(error) = self.poll_all(core).await {
                 error!("poll failed: {:?}", error);
             }
         }
@@ -511,7 +519,7 @@ impl Approved {
 
     /// Handle message whose trust we can't establish because its proof contains only keys we don't
     /// know.
-    pub fn handle_untrusted_message(
+    pub async fn handle_untrusted_message(
         &self,
         core: &mut Core,
         sender: Option<SocketAddr>,
@@ -531,18 +539,17 @@ impl Approved {
         let bounce_msg = bounce_msg.to_bytes();
 
         if let Some(sender) = sender {
-            core.send_message_to_target(&sender, bounce_msg)
+            core.send_message_to_target(&sender, bounce_msg).await
         } else {
-            self.send_message_to_our_elders(core, bounce_msg)
+            self.send_message_to_our_elders(core, bounce_msg).await;
+            Ok(())
         }
-
-        Ok(())
     }
 
     /// Handle message that is "unknown" because we are not in the correct state (e.g. we are adult
     /// and the message is for elders). We bounce the message to our elders who have more
     /// information to decide what to do with it.
-    pub fn handle_unknown_message(
+    pub async fn handle_unknown_message(
         &self,
         core: &mut Core,
         sender: Option<SocketAddr>,
@@ -569,45 +576,43 @@ impl Approved {
                 .any(|p2p_node| p2p_node.peer_addr() == sender)
         });
         if let Some(sender) = our_elder_sender {
-            core.send_message_to_target(&sender, bounce_msg)
+            core.send_message_to_target(&sender, bounce_msg).await
         } else {
-            self.send_message_to_our_elders(core, bounce_msg)
+            self.send_message_to_our_elders(core, bounce_msg);
+            Ok(())
         }
-
-        Ok(())
     }
 
-    pub fn handle_bounced_untrusted_message(
+    pub async fn handle_bounced_untrusted_message(
         &mut self,
         core: &mut Core,
         sender: P2pNode,
         dst_key: Option<bls::PublicKey>,
         bounced_msg: Message,
-    ) {
+    ) -> Result<()> {
         trace!(
             "Received BouncedUntrustedMessage({:?}) from {}...",
             bounced_msg,
             sender
         );
 
-        let dst_key = if let Some(dst_key) = dst_key {
-            dst_key
+        if let Some(dst_key) = dst_key {
+            let resend_msg = bounced_msg
+                .extend_proof_chain(&dst_key, &self.shared_state.our_history)
+                .map_err(|err| {
+                    RoutingError::ToBeDefined(format!(
+                        "...extending proof failed, discarding: {:?}",
+                        err
+                    ))
+                })?;
+
+            trace!("    ...resending with extended proof");
+            core.send_message_to_target(sender.peer_addr(), resend_msg.to_bytes())
+                .await
         } else {
             trace!("    ...missing dst key, discarding");
-            return;
-        };
-
-        let resend_msg =
-            match bounced_msg.extend_proof_chain(&dst_key, &self.shared_state.our_history) {
-                Ok(msg) => msg,
-                Err(error) => {
-                    trace!("    ...extending proof failed, discarding: {:?}", error);
-                    return;
-                }
-            };
-
-        trace!("    ...resending with extended proof");
-        core.send_message_to_target(sender.peer_addr(), resend_msg.to_bytes())
+            Ok(())
+        }
     }
 
     pub fn handle_bounced_unknown_message(
@@ -848,7 +853,7 @@ impl Approved {
             .known_nodes()
             .map(|node| *node.peer_addr())
         {
-            core.transport.disconnect(addr);
+            //TODO??: core.transport.disconnect(addr);
         }
 
         Some(RelocateParams {
@@ -859,7 +864,7 @@ impl Approved {
 
     /// Handles a signature of a `SignedMessage`, and if we have enough to verify the signed
     /// message, handles it.
-    pub fn handle_message_signature(
+    pub async fn handle_message_signature(
         &mut self,
         core: &mut Core,
         msg: AccumulatingMessage,
@@ -875,7 +880,7 @@ impl Approved {
         }
 
         if let Some(msg) = self.message_accumulator.add(msg) {
-            self.handle_accumulated_message(core, msg)?
+            self.handle_accumulated_message(core, msg).await?
         }
 
         Ok(())
@@ -1004,7 +1009,7 @@ impl Approved {
         })
     }
 
-    pub fn handle_parsec_request(
+    pub async fn handle_parsec_request(
         &mut self,
         core: &mut Core,
         msg_version: u64,
@@ -1030,7 +1035,7 @@ impl Approved {
         }
 
         match msg_version.cmp(&self.consensus_engine.parsec_version()) {
-            Ordering::Equal => self.poll_all(core),
+            Ordering::Equal => self.poll_all(core).await,
             Ordering::Greater => {
                 // We are lagging behind. Send a request whose response might help us catch up.
                 self.send_parsec_gossip(
@@ -1043,7 +1048,7 @@ impl Approved {
         }
     }
 
-    pub fn handle_parsec_response(
+    pub async fn handle_parsec_response(
         &mut self,
         core: &mut Core,
         msg_version: u64,
@@ -1056,7 +1061,7 @@ impl Approved {
             .handle_parsec_response(msg_version, parsec_response, pub_id);
 
         if msg_version == self.consensus_engine.parsec_version() {
-            self.poll_all(core)
+            self.poll_all(core).await
         } else {
             Ok(())
         }
@@ -1163,7 +1168,7 @@ impl Approved {
         }
     }
 
-    fn handle_accumulated_message(&mut self, core: &mut Core, msg: Message) -> Result<()> {
+    async fn handle_accumulated_message(&mut self, core: &mut Core, msg: Message) -> Result<()> {
         trace!("accumulated message {:?}", msg);
 
         // TODO: this is almost the same as `Node::try_handle_message` - find a way
@@ -1190,11 +1195,12 @@ impl Approved {
             }
             MessageStatus::Untrusted => {
                 trace!("Untrusted accumulated message: {:?}", msg);
-                self.handle_untrusted_message(core, None, msg)
+                self.handle_untrusted_message(core, None, msg).await
             }
             MessageStatus::Unknown => {
                 trace!("Unknown accumulated message: {:?}", msg);
                 self.handle_unknown_message(core, None, msg.to_bytes())
+                    .await
             }
             MessageStatus::Useless => {
                 trace!("Useless accumulated message: {:?}", msg);
@@ -1208,8 +1214,8 @@ impl Approved {
     ////////////////////////////////////////////////////////////////////////////
 
     // Polls and processes all accumulated events.
-    fn poll_all(&mut self, core: &mut Core) -> Result<()> {
-        while self.poll_one(core)? {}
+    async fn poll_all(&mut self, core: &mut Core) -> Result<()> {
+        while self.poll_one(core).await? {}
         self.vote_for_remove_unresponsive_peers();
 
         Ok(())
@@ -1219,7 +1225,7 @@ impl Approved {
     //
     // If the event is a `SectionInfo` or `NeighbourInfo`, it also updates the corresponding
     // containers.
-    fn poll_one(&mut self, core: &mut Core) -> Result<bool> {
+    async fn poll_one(&mut self, core: &mut Core) -> Result<bool> {
         // Note: it's important that `promote_and_demote_elders` happens before `poll_relocation`,
         // otherwise we might relocate a node that we still need.
         if self.promote_and_demote_elders(core) {
@@ -1235,7 +1241,7 @@ impl Approved {
             Some((event, proof)) => (event, proof),
         };
 
-        self.handle_ordered_consensus(core, event, proof)?;
+        self.handle_ordered_consensus(core, event, proof).await?;
 
         Ok(true)
     }
@@ -1431,7 +1437,7 @@ impl Approved {
         false
     }
 
-    fn handle_ordered_consensus(
+    async fn handle_ordered_consensus(
         &mut self,
         core: &mut Core,
         event: AccumulatingEvent,
@@ -1587,7 +1593,7 @@ impl Approved {
 
             self.members_changed = true;
 
-            core.transport.disconnect(*info.p2p_node.peer_addr());
+            //TODO?? core.transport.disconnect(*info.p2p_node.peer_addr());
             core.send_event(Event::MemberLeft {
                 name,
                 age: info.age(),
@@ -1600,7 +1606,7 @@ impl Approved {
         }
     }
 
-    fn handle_relocate_event(
+    async fn handle_relocate_event(
         &mut self,
         core: &mut Core,
         details: RelocateDetails,
@@ -1652,6 +1658,7 @@ impl Approved {
         let content = Variant::Relocate(details);
 
         self.send_routing_message(core, src, dst, content, Some(knowledge_index))
+            .await
     }
 
     fn notify_old_elders(
@@ -2259,7 +2266,7 @@ impl Approved {
     //
     // If `proof_start_index_override` is set it will be used as the starting index of the proof.
     // Otherwise the index is calculated using the knowledge stored in the section map.
-    pub fn send_routing_message(
+    pub async fn send_routing_message(
         &mut self,
         core: &mut Core,
         src: SrcLocation,
@@ -2282,7 +2289,7 @@ impl Approved {
         // short
         if !src.is_section() {
             let msg = Message::single_src(&core.full_id, dst, variant, None, None)?;
-            return self.handle_accumulated_message(core, msg);
+            return self.handle_accumulated_message(core, msg).await;
         }
 
         let accumulating_msg =
@@ -2302,7 +2309,7 @@ impl Approved {
         for target in targets {
             if target.name() == core.name() {
                 if let Some(msg) = self.message_accumulator.add(accumulating_msg.clone()) {
-                    self.handle_accumulated_message(core, msg)?;
+                    self.handle_accumulated_message(core, msg).await?;
                 }
             } else {
                 core.send_direct_message(
@@ -2344,7 +2351,7 @@ impl Approved {
 
     // TODO: consider changing this so it sends only to a subset of the elders
     // (say 1/3 of the ones closest to our name or so)
-    fn send_message_to_our_elders(&self, core: &mut Core, msg_bytes: Bytes) {
+    async fn send_message_to_our_elders(&self, core: &mut Core, msg_bytes: Bytes) {
         let targets: Vec<_> = self
             .shared_state
             .sections
@@ -2353,6 +2360,7 @@ impl Approved {
             .copied()
             .collect();
         core.send_message_to_targets(&targets, targets.len(), msg_bytes)
+            .await
     }
 
     ////////////////////////////////////////////////////////////////////////////
@@ -2372,7 +2380,7 @@ impl Approved {
                 continue;
             }
 
-            core.transport.disconnect(*p2p_node.peer_addr());
+            //TODO??? core.transport.disconnect(*p2p_node.peer_addr());
         }
     }
 

@@ -85,6 +85,7 @@ pub fn delivery_targets(
             candidates(target_name, our_id, sections)?
         }
         DstLocation::Direct => return Err(RoutingError::CannotRoute),
+        DstLocation::Client(_) => return Err(RoutingError::CannotRoute),
     };
 
     Ok((best_section, dg_size))
@@ -147,7 +148,7 @@ where
     let dst_name = match dst {
         DstLocation::Node(name) => *name,
         DstLocation::Section(name) => *name,
-        DstLocation::Direct => {
+        DstLocation::Direct | DstLocation::Client(_) => {
             log_or_panic!(
                 log::Level::Error,
                 "Invalid destination for signature targets: {:?}",
