@@ -14,10 +14,8 @@ mod tests;
 #[cfg(feature = "mock_base")]
 pub use self::stage::{BOOTSTRAP_TIMEOUT, JOIN_TIMEOUT};
 
-use self::{
-    event_stream::EventStream,
-    stage::{Approved, Bootstrapping, JoinParams, Joining, RelocateParams, Stage},
-};
+pub use self::event_stream::EventStream;
+use self::stage::{Approved, Bootstrapping, JoinParams, Joining, RelocateParams, Stage};
 use crate::{
     core::Core,
     error::{Result, RoutingError},
@@ -27,7 +25,6 @@ use crate::{
     log_utils,
     messages::{BootstrapResponse, EldersUpdate, Message, MessageStatus, QueuedMessage, Variant},
     network_params::NetworkParams,
-    pause::PausedState,
     relocation::SignedRelocateDetails,
     rng::{self, MainRng},
     section::SectionProofChain,
@@ -36,7 +33,7 @@ use crate::{
 };
 
 use bytes::Bytes;
-use crossbeam_channel::{Receiver, RecvError, Select};
+use crossbeam_channel::{Receiver, Select};
 use itertools::Itertools;
 use std::net::SocketAddr;
 use xor_name::{Prefix, XorName};
@@ -100,19 +97,16 @@ impl Node {
     ///
     /// Returns the node itself, the user event receiver and the client network
     /// event receiver.
-    pub async fn new(config: NodeConfig) -> Result<(Self, Receiver<Event>)> {
+    pub async fn new(config: NodeConfig) -> Result<Self> {
         let (timer_tx, timer_rx) = crossbeam_channel::unbounded();
-        let (user_event_tx, user_event_rx) = crossbeam_channel::unbounded();
 
         let first = config.first;
-        let mut core = Core::new(config, timer_tx, user_event_tx)?;
+        let mut core = Core::new(config, timer_tx)?;
 
         let stage = if first {
             match Approved::first(&mut core) {
                 Ok(stage) => {
                     info!("{} Started a new network as a seed node.", core.name());
-                    core.send_event(Event::Connected(Connected::First));
-                    core.send_event(Event::PromotedToElder);
                     Stage::Approved(stage)
                 }
                 Err(error) => {
@@ -126,18 +120,16 @@ impl Node {
             }
         } else {
             info!("{} Bootstrapping a new node.", core.name());
-            core.quic_p2p.bootstrap().await?;
+            core.bootstrap().await?;
             Stage::Bootstrapping(Bootstrapping::new(None))
         };
 
-        let node = Self {
+        Ok(Self {
             stage,
             core,
             timer_rx,
             timer_rx_idx: 0,
-        };
-
-        Ok((node, user_event_rx))
+        })
     }
 
     /// Starts listening for events returning a stream where to read them from.
@@ -147,7 +139,7 @@ impl Node {
 
     /// Pauses the node in order to be upgraded and/or restarted.
     /// Returns `InvalidState` error if the node is not a member of any section yet.
-    pub fn pause(self) -> Result<PausedState> {
+    /*pub fn pause(self) -> Result<PausedState> {
         if let Stage::Approved(stage) = self.stage {
             info!("Pause");
 
@@ -158,31 +150,31 @@ impl Node {
             Err(RoutingError::InvalidState)
         }
     }
-    /*
-        /// Resume previously paused node.
-        pub fn resume(mut state: PausedState) -> (Self, Receiver<Event>) {
-            let (timer_tx, timer_rx) = crossbeam_channel::unbounded();
-            let transport_rx = state
-                .transport_rx
-                .take()
-                .expect("PausedState is incomplete");
-            let (user_event_tx, user_event_rx) = crossbeam_channel::unbounded();
 
-            let (stage, core) = Approved::resume(state, timer_tx, user_event_tx);
+    /// Resume previously paused node.
+    pub fn resume(mut state: PausedState) -> (Self, Receiver<Event>) {
+        let (timer_tx, timer_rx) = crossbeam_channel::unbounded();
+        let transport_rx = state
+            .transport_rx
+            .take()
+            .expect("PausedState is incomplete");
+        let (user_event_tx, user_event_rx) = crossbeam_channel::unbounded();
 
-            info!("Resume");
+        let (stage, core) = Approved::resume(state, timer_tx, user_event_tx);
 
-            let node = Self {
-                stage: Stage::Approved(stage),
-                core,
-                timer_rx,
-                timer_rx_idx: 0,
-                transport_rx,
-                transport_rx_idx: 0,
-            };
+        info!("Resume");
 
-            (node, user_event_rx)
-        }
+        let node = Self {
+            stage: Stage::Approved(stage),
+            core,
+            timer_rx,
+            timer_rx_idx: 0,
+            transport_rx,
+            transport_rx_idx: 0,
+        };
+
+        (node, user_event_rx)
+    }
     */
     /// Register the node event channels with the provided [selector](mpmc::Select).
     pub fn register<'a>(&'a mut self, select: &mut Select<'a>) {
@@ -204,23 +196,29 @@ impl Node {
     /// of the event channels, or an invalid (unknown) channel index.
     ///
     /// [`Select::ready`]: https://docs.rs/crossbeam-channel/0.3/crossbeam_channel/struct.Select.html#method.ready
-    pub async fn handle_selected_operation(&mut self, op_index: usize) -> Result<(), RecvError> {
+    pub async fn handle_selected_operation(&mut self, op_index: usize) -> Result<()> {
         if !self.is_running() {
-            return Err(RecvError);
+            return Err(RoutingError::ToBeDefined(
+                "previously it was a RecvError".to_string(),
+            ));
         }
 
         let _log_ident = self.set_log_ident();
         if op_index == self.timer_rx_idx {
-            let token = self.timer_rx.recv()?;
-            self.handle_timeout(token);
+            let token = self.timer_rx.recv().map_err(|err| {
+                RoutingError::ToBeDefined(format!("previously it was a RecvError: {}", err))
+            })?;
+            self.handle_timeout(token).await?;
         } else {
-            return Err(RecvError);
+            return Err(RoutingError::ToBeDefined(
+                "previously it was a RecvError".to_string(),
+            ));
         }
 
         self.handle_messages().await;
 
         if let Stage::Approved(stage) = &mut self.stage {
-            stage.finish_handle_input(&mut self.core);
+            stage.finish_handle_input(&mut self.core).await;
         }
 
         Ok(())
@@ -375,9 +373,12 @@ impl Node {
     }
 
     /// Send a message to a client peer.
-    pub fn send_message_to_client(&mut self, peer_addr: SocketAddr, msg: Bytes) -> Result<()> {
-        self.core.send_message_to_target(&peer_addr, msg);
-        Ok(())
+    pub async fn send_message_to_client(
+        &mut self,
+        peer_addr: SocketAddr,
+        msg: Bytes,
+    ) -> Result<()> {
+        self.core.send_message_to_target(&peer_addr, msg).await
     }
 
     /// Disconnect form a client peer.
@@ -428,12 +429,16 @@ impl Node {
     // Input handling
     ////////////////////////////////////////////////////////////////////////////
 
-    fn handle_connection_failure(&mut self, addr: SocketAddr) {
+    async fn handle_connection_failure(&mut self, addr: SocketAddr) -> Result<()> {
         if let Stage::Approved(stage) = &mut self.stage {
-            stage.handle_connection_failure(&mut self.core, addr);
+            stage
+                .handle_connection_failure(&mut self.core, addr)
+                .await?;
         } else {
             trace!("ConnectionFailure from {}", addr);
         }
+
+        Ok(())
     }
 
     async fn handle_new_message(&mut self, sender: SocketAddr, bytes: Bytes) {
@@ -466,7 +471,7 @@ impl Node {
 
         match &mut self.stage {
             Stage::Bootstrapping(stage) => stage.handle_timeout(&mut self.core, token),
-            Stage::Joining(stage) => stage.handle_timeout(&mut self.core, token),
+            Stage::Joining(stage) => stage.handle_timeout(&mut self.core, token).await?,
             Stage::Approved(stage) => stage.handle_timeout(&mut self.core, token).await?,
             Stage::Terminated => {}
         }
@@ -487,21 +492,22 @@ impl Node {
     async fn try_handle_message(&mut self, sender: SocketAddr, msg: Message) -> Result<()> {
         trace!("try handle message {:?}", msg);
 
-        self.try_relay_message(&msg)?;
+        self.try_relay_message(&msg).await?;
 
         if !self.in_dst_location(msg.dst()) {
             return Ok(());
         }
 
-        if self.core.msg_filter.contains_incoming(&msg) {
+        // TODO: filter messages which are already handled???
+        /*if self.core.msg_filter.contains_incoming(&msg) {
             trace!("not handling message - already handled: {:?}", msg);
             return Ok(());
-        }
+        }*/
 
         match self.decide_message_status(&msg)? {
             MessageStatus::Useful => {
-                self.core.msg_filter.insert_incoming(&msg);
-                self.handle_message(sender, msg)
+                //self.core.msg_filter.insert_incoming(&msg);
+                self.handle_message(sender, msg).await
             }
             MessageStatus::Untrusted => {
                 debug!("Untrusted message from {}: {:?} ", sender, msg);
@@ -518,18 +524,18 @@ impl Node {
         }
     }
 
-    fn try_relay_message(&mut self, msg: &Message) -> Result<()> {
+    async fn try_relay_message(&mut self, msg: &Message) -> Result<()> {
         if !self.in_dst_location(msg.dst()) || msg.dst().is_section() {
             // Relay closer to the destination or broadcast to the rest of our section.
-            self.relay_message(msg)
+            self.relay_message(msg).await
         } else {
             Ok(())
         }
     }
 
-    fn relay_message(&mut self, msg: &Message) -> Result<()> {
+    async fn relay_message(&mut self, msg: &Message) -> Result<()> {
         match &mut self.stage {
-            Stage::Approved(stage) => stage.relay_message(&mut self.core, msg),
+            Stage::Approved(stage) => stage.relay_message(&mut self.core, msg).await,
             Stage::Bootstrapping(_) | Stage::Joining(_) | Stage::Terminated => Ok(()),
         }
     }
@@ -543,9 +549,9 @@ impl Node {
         }
     }
 
-    fn handle_message(&mut self, sender: SocketAddr, msg: Message) -> Result<()> {
+    async fn handle_message(&mut self, sender: SocketAddr, msg: Message) -> Result<()> {
         if let Stage::Approved(stage) = &mut self.stage {
-            stage.update_section_knowledge(&mut self.core, &msg)?;
+            stage.update_section_knowledge(&mut self.core, &msg).await?;
         }
 
         self.core.msg_queue.push_back(msg.into_queued(Some(sender)));
@@ -570,12 +576,15 @@ impl Node {
         match &mut self.stage {
             Stage::Bootstrapping(stage) => match msg.variant() {
                 Variant::BootstrapResponse(response) => {
-                    if let Some(params) = stage.handle_bootstrap_response(
-                        &mut self.core,
-                        msg.src().to_sender_node(sender)?,
-                        response.clone(),
-                    )? {
-                        self.join(params);
+                    if let Some(params) = stage
+                        .handle_bootstrap_response(
+                            &mut self.core,
+                            msg.src().to_sender_node(sender)?,
+                            response.clone(),
+                        )
+                        .await?
+                    {
+                        self.join(params).await?;
                     }
                 }
                 _ => unreachable!(),
@@ -584,12 +593,16 @@ impl Node {
                 Variant::BootstrapResponse(BootstrapResponse::Join {
                     elders_info,
                     section_key,
-                }) => stage.handle_bootstrap_response(
-                    &mut self.core,
-                    msg.src().to_sender_node(sender)?,
-                    elders_info.clone(),
-                    *section_key,
-                )?,
+                }) => {
+                    stage
+                        .handle_bootstrap_response(
+                            &mut self.core,
+                            msg.src().to_sender_node(sender)?,
+                            elders_info.clone(),
+                            *section_key,
+                        )
+                        .await?
+                }
                 Variant::NodeApproval(payload) => {
                     let connect_type = stage.connect_type();
                     let msg_backlog = stage.take_message_backlog();
@@ -615,16 +628,24 @@ impl Node {
                 Variant::Promote {
                     shared_state,
                     parsec_version,
-                } => stage.handle_promote(&mut self.core, shared_state.clone(), *parsec_version)?,
+                } => {
+                    stage
+                        .handle_promote(&mut self.core, shared_state.clone(), *parsec_version)
+                        .await?
+                }
                 Variant::NotifyLagging {
                     shared_state,
                     parsec_version,
-                } => stage.handle_lagging(&mut self.core, shared_state.clone(), *parsec_version)?,
+                } => {
+                    stage
+                        .handle_lagging(&mut self.core, shared_state.clone(), *parsec_version)
+                        .await?
+                }
                 Variant::Relocate(_) => {
                     msg.src().check_is_section()?;
                     let signed_relocate = SignedRelocateDetails::new(msg)?;
                     if let Some(params) = stage.handle_relocate(&mut self.core, signed_relocate) {
-                        self.relocate(params)
+                        self.relocate(params).await?;
                     }
                 }
                 Variant::MessageSignature(accumulating_msg) => {
@@ -636,20 +657,30 @@ impl Node {
                         )
                         .await;
                     if let Some(addr) = sender {
-                        stage.check_lagging(&mut self.core, &addr, &accumulating_msg.proof_share);
+                        stage
+                            .check_lagging(&mut self.core, &addr, &accumulating_msg.proof_share)
+                            .await?;
                     }
                     result?
                 }
-                Variant::BootstrapRequest(name) => stage.handle_bootstrap_request(
-                    &mut self.core,
-                    msg.src().to_sender_node(sender)?,
-                    *name,
-                ),
-                Variant::JoinRequest(join_request) => stage.handle_join_request(
-                    &mut self.core,
-                    msg.src().to_sender_node(sender)?,
-                    *join_request.clone(),
-                ),
+                Variant::BootstrapRequest(name) => {
+                    stage
+                        .handle_bootstrap_request(
+                            &mut self.core,
+                            msg.src().to_sender_node(sender)?,
+                            *name,
+                        )
+                        .await?
+                }
+                Variant::JoinRequest(join_request) => {
+                    stage
+                        .handle_join_request(
+                            &mut self.core,
+                            msg.src().to_sender_node(sender)?,
+                            *join_request.clone(),
+                        )
+                        .await?
+                }
                 Variant::ParsecRequest(version, request) => {
                     stage
                         .handle_parsec_request(
@@ -696,38 +727,42 @@ impl Node {
                     section_key_index,
                     message,
                 } => {
-                    stage.handle_dkg_message(
-                        &mut self.core,
-                        participants.clone(),
-                        *section_key_index,
-                        message.clone(),
-                        *msg.src().as_node()?,
-                    )?;
+                    stage
+                        .handle_dkg_message(
+                            &mut self.core,
+                            participants.clone(),
+                            *section_key_index,
+                            message.clone(),
+                            *msg.src().as_node()?,
+                        )
+                        .await?;
                 }
                 Variant::DKGOldElders {
                     participants,
                     section_key_index,
                     public_key_set,
                 } => {
-                    stage.handle_dkg_old_elders(
-                        &mut self.core,
-                        participants.clone(),
-                        *section_key_index,
-                        public_key_set.clone(),
-                        *msg.src().as_node()?,
-                    )?;
+                    stage
+                        .handle_dkg_old_elders(
+                            &mut self.core,
+                            participants.clone(),
+                            *section_key_index,
+                            public_key_set.clone(),
+                            *msg.src().as_node()?,
+                        )
+                        .await?;
                 }
                 Variant::Vote {
                     content,
                     proof_share,
                 } => {
-                    let result = stage.handle_unordered_vote(
-                        &mut self.core,
-                        content.clone(),
-                        proof_share.clone(),
-                    );
+                    let result = stage
+                        .handle_unordered_vote(&mut self.core, content.clone(), proof_share.clone())
+                        .await;
                     if let Some(addr) = sender {
-                        stage.check_lagging(&mut self.core, &addr, proof_share);
+                        stage
+                            .check_lagging(&mut self.core, &addr, proof_share)
+                            .await?;
                     }
 
                     result?
@@ -773,7 +808,7 @@ impl Node {
     ////////////////////////////////////////////////////////////////////////////
 
     // Transition from Bootstrapping to Joining
-    fn join(&mut self, params: JoinParams) {
+    async fn join(&mut self, params: JoinParams) -> Result<()> {
         let JoinParams {
             elders_info,
             section_key,
@@ -781,13 +816,18 @@ impl Node {
             msg_backlog,
         } = params;
 
-        self.stage = Stage::Joining(Joining::new(
-            &mut self.core,
-            elders_info,
-            section_key,
-            relocate_payload,
-            msg_backlog,
-        ));
+        self.stage = Stage::Joining(
+            Joining::new(
+                &mut self.core,
+                elders_info,
+                section_key,
+                relocate_payload,
+                msg_backlog,
+            )
+            .await?,
+        );
+
+        Ok(())
     }
 
     // Transition from Joining to Approved
@@ -819,7 +859,7 @@ impl Node {
     }
 
     // Transition from Approved to Bootstrapping on relocation
-    fn relocate(&mut self, params: RelocateParams) {
+    async fn relocate(&mut self, params: RelocateParams) -> Result<()> {
         let RelocateParams {
             conn_infos,
             details,
@@ -828,10 +868,13 @@ impl Node {
         let mut stage = Bootstrapping::new(Some(details));
 
         for conn_info in conn_infos {
-            stage.send_bootstrap_request(&mut self.core, conn_info)
+            stage
+                .send_bootstrap_request(&mut self.core, conn_info)
+                .await?;
         }
 
         self.stage = Stage::Bootstrapping(stage);
+        Ok(())
     }
 
     fn set_log_ident(&self) -> log_utils::Guard {
@@ -983,13 +1026,13 @@ impl Node {
 
     /// Returns the number of elders this node is using.
     pub fn elder_size(&self) -> usize {
-        self.core.network_params.elder_size
+        self.core.network_params().elder_size
     }
 
     /// Size at which our section splits. Since this is configurable, this method is used to
     /// obtain it.
     pub fn recommended_section_size(&self) -> usize {
-        self.core.network_params.recommended_section_size
+        self.core.network_params().recommended_section_size
     }
 
     /// Provide a SectionProofSlice that proves the given signature to the given destination.
