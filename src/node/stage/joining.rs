@@ -12,14 +12,13 @@ use crate::{
     event::Connected,
     id::P2pNode,
     messages::{
-        self, BootstrapResponse, JoinRequest, Message, MessageStatus, QueuedMessage, Variant,
-        VerifyStatus,
+        self, BootstrapResponse, JoinRequest, Message, MessageStatus, Variant, VerifyStatus,
     },
     relocation::RelocatePayload,
     section::EldersInfo,
 };
 
-use std::{mem, net::SocketAddr, time::Duration};
+use std::time::Duration;
 use xor_name::Prefix;
 
 /// Time after which an attempt to joining a section is cancelled (and possibly retried).
@@ -33,10 +32,6 @@ pub(crate) struct Joining {
     section_key: bls::PublicKey,
     // Whether we are joining as infant or relocating.
     join_type: JoinType,
-    // Token for the join request timeout.
-    timer_token: u64,
-    // Message we can't handle until we are joined.
-    msg_backlog: Vec<QueuedMessage>,
 }
 
 impl Joining {
@@ -45,27 +40,23 @@ impl Joining {
         elders_info: EldersInfo,
         section_key: bls::PublicKey,
         relocate_payload: Option<RelocatePayload>,
-        msg_backlog: Vec<QueuedMessage>,
     ) -> Result<Self> {
         let join_type = match relocate_payload {
             Some(payload) => JoinType::Relocate(payload),
             None => JoinType::First,
         };
-        let timer_token = core.timer.schedule(JOIN_TIMEOUT);
 
         let stage = Self {
             elders_info,
             section_key,
             join_type,
-            timer_token,
-            msg_backlog,
         };
         stage.send_join_requests(core).await?;
 
         Ok(stage)
     }
 
-    pub async fn handle_timeout(&mut self, core: &mut Core, token: u64) -> Result<()> {
+    /*pub async fn handle_timeout(&mut self, core: &mut Core, token: u64) -> Result<()> {
         if token == self.timer_token {
             debug!("Timeout when trying to join a section");
             // Try again
@@ -73,7 +64,7 @@ impl Joining {
             self.timer_token = core.timer.schedule(JOIN_TIMEOUT);
         }
         Ok(())
-    }
+    }*/
 
     pub fn decide_message_status(&self, msg: &Message) -> Result<MessageStatus> {
         match msg.variant() {
@@ -118,10 +109,6 @@ impl Joining {
         }
     }
 
-    pub fn handle_unknown_message(&mut self, sender: SocketAddr, msg: Message) {
-        self.msg_backlog.push(msg.into_queued(Some(sender)));
-    }
-
     pub async fn handle_bootstrap_response(
         &mut self,
         core: &mut Core,
@@ -164,11 +151,6 @@ impl Joining {
             JoinType::First { .. } => Connected::First,
             JoinType::Relocate(_) => Connected::Relocate,
         }
-    }
-
-    // Remove and return the message backlog.
-    pub fn take_message_backlog(&mut self) -> Vec<QueuedMessage> {
-        mem::take(&mut self.msg_backlog)
     }
 
     async fn send_join_requests(&self, core: &mut Core) -> Result<()> {

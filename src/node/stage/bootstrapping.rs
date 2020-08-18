@@ -10,14 +10,14 @@ use crate::{
     core::Core,
     error::Result,
     id::{FullId, P2pNode},
-    messages::{BootstrapResponse, Message, MessageStatus, QueuedMessage, Variant, VerifyStatus},
+    messages::{BootstrapResponse, Message, MessageStatus, Variant, VerifyStatus},
     relocation::{RelocatePayload, SignedRelocateDetails},
     section::EldersInfo,
     time::Duration,
 };
 
 use fxhash::FxHashSet;
-use std::{collections::HashMap, iter, mem, net::SocketAddr};
+use std::{collections::HashMap, iter, net::SocketAddr};
 use xor_name::Prefix;
 
 /// Time after which bootstrap is cancelled (and possibly retried).
@@ -29,7 +29,6 @@ pub(crate) struct Bootstrapping {
     pending_requests: FxHashSet<SocketAddr>,
     timeout_tokens: HashMap<u64, SocketAddr>,
     relocate_details: Option<SignedRelocateDetails>,
-    msg_backlog: Vec<QueuedMessage>,
 }
 
 impl Bootstrapping {
@@ -38,7 +37,6 @@ impl Bootstrapping {
             pending_requests: Default::default(),
             timeout_tokens: Default::default(),
             relocate_details,
-            msg_backlog: Vec::new(),
         }
     }
 
@@ -92,10 +90,6 @@ impl Bootstrapping {
         }
     }
 
-    pub fn handle_unknown_message(&mut self, sender: SocketAddr, msg: Message) {
-        self.msg_backlog.push(msg.into_queued(Some(sender)))
-    }
-
     pub async fn handle_bootstrap_response(
         &mut self,
         core: &mut Core,
@@ -127,7 +121,6 @@ impl Bootstrapping {
                     elders_info,
                     section_key,
                     relocate_payload,
-                    msg_backlog: mem::take(&mut self.msg_backlog),
                 }))
             }
             BootstrapResponse::Rebootstrap(new_conn_infos) => {
@@ -146,8 +139,8 @@ impl Bootstrapping {
             return Ok(());
         }
 
-        let token = core.timer.schedule(BOOTSTRAP_TIMEOUT);
-        let _ = self.timeout_tokens.insert(token, dst);
+        //let token = core.timer.schedule(BOOTSTRAP_TIMEOUT);
+        //let _ = self.timeout_tokens.insert(token, dst);
 
         let destination = match &self.relocate_details {
             Some(details) => *details.destination(),
@@ -216,7 +209,6 @@ pub(crate) struct JoinParams {
     pub elders_info: EldersInfo,
     pub section_key: bls::PublicKey,
     pub relocate_payload: Option<RelocatePayload>,
-    pub msg_backlog: Vec<QueuedMessage>,
 }
 
 fn verify_message(msg: &Message) -> Result<()> {

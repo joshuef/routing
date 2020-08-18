@@ -11,18 +11,15 @@ use crate::{
     event::Event,
     id::{FullId, PublicId},
     location::DstLocation,
-    messages::{Message, QueuedMessage, Variant},
+    messages::{Message, Variant},
     network_params::NetworkParams,
     node::{event_stream::EventStream, NodeConfig},
-    quic_p2p::OurType,
     rng::MainRng,
-    timer::Timer,
 };
 use bytes::Bytes;
-use crossbeam_channel::Sender;
 use hex_fmt::HexFmt;
 use quic_p2p::QuicP2p;
-use std::{collections::VecDeque, net::SocketAddr};
+use std::net::SocketAddr;
 use xor_name::XorName;
 
 // Core components of the node.
@@ -30,17 +27,14 @@ pub(crate) struct Core {
     network_params: NetworkParams,
     full_id: FullId,
     quic_p2p: QuicP2p,
-    pub msg_queue: VecDeque<QueuedMessage>, // TODO: to be removed
-    pub timer: Timer,                       // TODO: to be removed
     rng: MainRng,
 }
 
 impl Core {
-    pub fn new(mut config: NodeConfig, timer_tx: Sender<u64>) -> Result<Self> {
+    pub fn new(mut config: NodeConfig) -> Result<Self> {
         let mut rng = config.rng;
         let full_id = config.full_id.unwrap_or_else(|| FullId::gen(&mut rng));
 
-        config.transport_config.our_type = OurType::Node;
         let quic_p2p =
             QuicP2p::with_config(Some(config.transport_config), Default::default(), true)?;
 
@@ -48,8 +42,6 @@ impl Core {
             network_params: config.network_params,
             full_id,
             quic_p2p,
-            msg_queue: Default::default(),
-            timer: Timer::new(timer_tx),
             rng,
         })
     }
