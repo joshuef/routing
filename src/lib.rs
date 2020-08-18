@@ -145,7 +145,6 @@ mod relocation;
 mod rng;
 mod section;
 mod time;
-mod timer;
 
 // Cryptography
 mod crypto;

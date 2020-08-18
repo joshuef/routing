@@ -10,11 +10,10 @@ use crate::{
     consensus::{ConsensusEngine, VoteAccumulator},
     id::FullId,
     message_filter::MessageFilter,
-    messages::{MessageAccumulator, QueuedMessage},
+    messages::MessageAccumulator,
     network_params::NetworkParams,
     section::{SectionKeysProvider, SectionUpdateBarrier, SharedState},
 };
-use std::collections::VecDeque;
 
 /// A type that wraps the internal state of a node while it is paused in order to be upgraded and/or
 /// restarted. A value of this type is obtained by pausing a node and can be then used to resume
@@ -31,8 +30,6 @@ pub struct PausedState {
     pub(super) section_keys_provider: SectionKeysProvider,
     pub(super) full_id: FullId,
     pub(super) msg_filter: MessageFilter,
-    pub(super) msg_queue: VecDeque<QueuedMessage>,
-    // TODO: instead of storing both transport and network_rx, store only the network config.
     pub(super) msg_accumulator: MessageAccumulator,
     pub(super) vote_accumulator: VoteAccumulator,
     pub(super) section_update_barrier: SectionUpdateBarrier,

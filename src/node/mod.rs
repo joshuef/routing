@@ -23,9 +23,9 @@ use crate::{
     id::{FullId, P2pNode, PublicId},
     location::{DstLocation, SrcLocation},
     log_utils,
-    messages::{BootstrapResponse, EldersUpdate, Message, MessageStatus, QueuedMessage, Variant},
+    messages::{EldersUpdate, Message, MessageStatus, Variant},
     network_params::NetworkParams,
-    relocation::SignedRelocateDetails,
+    //relocation::SignedRelocateDetails,
     rng::{self, MainRng},
     section::SectionProofChain,
     section::SharedState,
@@ -33,7 +33,6 @@ use crate::{
 };
 
 use bytes::Bytes;
-use crossbeam_channel::{Receiver, Select};
 use itertools::Itertools;
 use std::net::SocketAddr;
 use xor_name::{Prefix, XorName};
@@ -83,9 +82,6 @@ impl Default for NodeConfig {
 pub struct Node {
     core: Core,
     stage: Stage,
-
-    timer_rx: Receiver<u64>,
-    timer_rx_idx: usize,
 }
 
 impl Node {
@@ -98,10 +94,8 @@ impl Node {
     /// Returns the node itself, the user event receiver and the client network
     /// event receiver.
     pub async fn new(config: NodeConfig) -> Result<Self> {
-        let (timer_tx, timer_rx) = crossbeam_channel::unbounded();
-
         let first = config.first;
-        let mut core = Core::new(config, timer_tx)?;
+        let mut core = Core::new(config)?;
 
         let stage = if first {
             match Approved::first(&mut core) {
@@ -124,12 +118,7 @@ impl Node {
             Stage::Bootstrapping(Bootstrapping::new(None))
         };
 
-        Ok(Self {
-            stage,
-            core,
-            timer_rx,
-            timer_rx_idx: 0,
-        })
+        Ok(Self { stage, core })
     }
 
     /// Starts listening for events returning a stream where to read them from.
@@ -176,53 +165,6 @@ impl Node {
         (node, user_event_rx)
     }
     */
-    /// Register the node event channels with the provided [selector](mpmc::Select).
-    pub fn register<'a>(&'a mut self, select: &mut Select<'a>) {
-        // Populate action_rx timeouts
-        #[cfg(feature = "mock_base")]
-        self.core.timer.process_timers();
-
-        self.timer_rx_idx = select.recv(&self.timer_rx);
-    }
-
-    /// Processes events received externally from one of the channels.
-    /// For this function to work properly, the node event channels need to
-    /// be registered by calling [`ApprovedPeer::register`](#method.register).
-    /// [`Select::ready`] needs to be called to get `op_index`, the event channel index.
-    ///
-    /// This function is non-blocking.
-    ///
-    /// Errors are permanent failures due to either: node termination, the permanent closing of one
-    /// of the event channels, or an invalid (unknown) channel index.
-    ///
-    /// [`Select::ready`]: https://docs.rs/crossbeam-channel/0.3/crossbeam_channel/struct.Select.html#method.ready
-    pub async fn handle_selected_operation(&mut self, op_index: usize) -> Result<()> {
-        if !self.is_running() {
-            return Err(RoutingError::ToBeDefined(
-                "previously it was a RecvError".to_string(),
-            ));
-        }
-
-        let _log_ident = self.set_log_ident();
-        if op_index == self.timer_rx_idx {
-            let token = self.timer_rx.recv().map_err(|err| {
-                RoutingError::ToBeDefined(format!("previously it was a RecvError: {}", err))
-            })?;
-            self.handle_timeout(token).await?;
-        } else {
-            return Err(RoutingError::ToBeDefined(
-                "previously it was a RecvError".to_string(),
-            ));
-        }
-
-        self.handle_messages().await;
-
-        if let Stage::Approved(stage) = &mut self.stage {
-            stage.finish_handle_input(&mut self.core).await;
-        }
-
-        Ok(())
-    }
 
     /// Returns whether this node is running or has been terminated.
     pub fn is_running(&self) -> bool {
@@ -471,7 +413,7 @@ impl Node {
 
         match &mut self.stage {
             Stage::Bootstrapping(stage) => stage.handle_timeout(&mut self.core, token),
-            Stage::Joining(stage) => stage.handle_timeout(&mut self.core, token).await?,
+            Stage::Joining(stage) => {} //stage.handle_timeout(&mut self.core, token).await?,
             Stage::Approved(stage) => stage.handle_timeout(&mut self.core, token).await?,
             Stage::Terminated => {}
         }
@@ -515,7 +457,8 @@ impl Node {
             }
             MessageStatus::Unknown => {
                 debug!("Unknown message from {}: {:?} ", sender, msg);
-                self.handle_unknown_message(sender, msg).await
+                //self.handle_unknown_message(sender, msg).await
+                Ok(())
             }
             MessageStatus::Useless => {
                 debug!("Useless message from {}: {:?}", sender, msg);
@@ -554,23 +497,10 @@ impl Node {
             stage.update_section_knowledge(&mut self.core, &msg).await?;
         }
 
-        self.core.msg_queue.push_back(msg.into_queued(Some(sender)));
-
         Ok(())
     }
 
-    async fn handle_messages(&mut self) {
-        while let Some(QueuedMessage { message, sender }) = self.core.msg_queue.pop_front() {
-            if self.in_dst_location(message.dst()) {
-                match self.dispatch_message(sender, message).await {
-                    Ok(()) => (),
-                    Err(err) => debug!("Routing message dispatch failed: {:?}", err),
-                }
-            }
-        }
-    }
-
-    async fn dispatch_message(&mut self, sender: Option<SocketAddr>, msg: Message) -> Result<()> {
+    /*async fn dispatch_message(&mut self, sender: Option<SocketAddr>, msg: Message) -> Result<()> {
         trace!("Got {:?}", msg);
 
         match &mut self.stage {
@@ -775,7 +705,7 @@ impl Node {
         }
 
         Ok(())
-    }
+    }*/
 
     async fn handle_untrusted_message(&mut self, sender: SocketAddr, msg: Message) -> Result<()> {
         match &self.stage {
@@ -788,7 +718,7 @@ impl Node {
         }
     }
 
-    async fn handle_unknown_message(&mut self, sender: SocketAddr, msg: Message) -> Result<()> {
+    /*async fn handle_unknown_message(&mut self, sender: SocketAddr, msg: Message) -> Result<()> {
         match &mut self.stage {
             Stage::Bootstrapping(stage) => stage.handle_unknown_message(sender, msg),
             Stage::Joining(stage) => stage.handle_unknown_message(sender, msg),
@@ -801,7 +731,7 @@ impl Node {
         }
 
         Ok(())
-    }
+    }*/
 
     ////////////////////////////////////////////////////////////////////////////
     // Transitions
@@ -813,18 +743,10 @@ impl Node {
             elders_info,
             section_key,
             relocate_payload,
-            msg_backlog,
         } = params;
 
         self.stage = Stage::Joining(
-            Joining::new(
-                &mut self.core,
-                elders_info,
-                section_key,
-                relocate_payload,
-                msg_backlog,
-            )
-            .await?,
+            Joining::new(&mut self.core, elders_info, section_key, relocate_payload).await?,
         );
 
         Ok(())
@@ -834,7 +756,6 @@ impl Node {
     fn approve(
         &mut self,
         connect_type: Connected,
-        msg_backlog: Vec<QueuedMessage>,
         section_key: bls::PublicKey,
         elders_update: EldersUpdate,
     ) -> Result<()> {
@@ -852,7 +773,6 @@ impl Node {
         )?;
         self.stage = Stage::Approved(stage);
 
-        self.core.msg_queue.extend(msg_backlog);
         self.core.send_event(Event::Connected(connect_type));
 
         Ok(())
