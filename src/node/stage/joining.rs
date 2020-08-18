@@ -40,13 +40,13 @@ pub(crate) struct Joining {
 }
 
 impl Joining {
-    pub fn new(
+    pub async fn new(
         core: &mut Core,
         elders_info: EldersInfo,
         section_key: bls::PublicKey,
         relocate_payload: Option<RelocatePayload>,
         msg_backlog: Vec<QueuedMessage>,
-    ) -> Self {
+    ) -> Result<Self> {
         let join_type = match relocate_payload {
             Some(payload) => JoinType::Relocate(payload),
             None => JoinType::First,
@@ -60,17 +60,19 @@ impl Joining {
             timer_token,
             msg_backlog,
         };
-        stage.send_join_requests(core);
-        stage
+        stage.send_join_requests(core).await?;
+
+        Ok(stage)
     }
 
-    pub fn handle_timeout(&mut self, core: &mut Core, token: u64) {
+    pub async fn handle_timeout(&mut self, core: &mut Core, token: u64) -> Result<()> {
         if token == self.timer_token {
             debug!("Timeout when trying to join a section");
             // Try again
-            self.send_join_requests(core);
+            self.send_join_requests(core).await?;
             self.timer_token = core.timer.schedule(JOIN_TIMEOUT);
         }
+        Ok(())
     }
 
     pub fn decide_message_status(&self, msg: &Message) -> Result<MessageStatus> {
@@ -120,7 +122,7 @@ impl Joining {
         self.msg_backlog.push(msg.into_queued(Some(sender)));
     }
 
-    pub fn handle_bootstrap_response(
+    pub async fn handle_bootstrap_response(
         &mut self,
         core: &mut Core,
         sender: P2pNode,
@@ -138,7 +140,7 @@ impl Joining {
             );
             self.elders_info = new_elders_info;
             self.section_key = new_section_key;
-            self.send_join_requests(core);
+            self.send_join_requests(core).await?;
         } else {
             log_or_panic!(
                 log::Level::Error,
@@ -169,7 +171,7 @@ impl Joining {
         mem::take(&mut self.msg_backlog)
     }
 
-    fn send_join_requests(&self, core: &mut Core) {
+    async fn send_join_requests(&self, core: &mut Core) -> Result<()> {
         let relocate_payload = match &self.join_type {
             JoinType::First { .. } => None,
             JoinType::Relocate(payload) => Some(payload),
@@ -183,8 +185,10 @@ impl Joining {
 
             info!("Sending {:?} to {}", join_request, dst);
             let variant = Variant::JoinRequest(Box::new(join_request));
-            core.send_direct_message(dst.peer_addr(), variant);
+            core.send_direct_message(dst.peer_addr(), variant).await?;
         }
+
+        Ok(())
     }
 }
 

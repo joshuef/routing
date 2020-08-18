@@ -11,7 +11,6 @@ use crate::{
     event::Event,
     id::{FullId, PublicId},
     location::DstLocation,
-    message_filter::MessageFilter,
     messages::{Message, QueuedMessage, Variant},
     network_params::NetworkParams,
     node::{event_stream::EventStream, NodeConfig},
@@ -28,22 +27,16 @@ use xor_name::XorName;
 
 // Core components of the node.
 pub(crate) struct Core {
-    pub network_params: NetworkParams,
-    pub full_id: FullId,
-    pub quic_p2p: QuicP2p,
-    pub msg_filter: MessageFilter,
-    pub msg_queue: VecDeque<QueuedMessage>,
-    pub timer: Timer,
-    pub rng: MainRng,
-    user_event_tx: Sender<Event>,
+    network_params: NetworkParams,
+    full_id: FullId,
+    quic_p2p: QuicP2p,
+    pub msg_queue: VecDeque<QueuedMessage>, // TODO: to be removed
+    pub timer: Timer,                       // TODO: to be removed
+    rng: MainRng,
 }
 
 impl Core {
-    pub fn new(
-        mut config: NodeConfig,
-        timer_tx: Sender<u64>,
-        user_event_tx: Sender<Event>,
-    ) -> Result<Self> {
+    pub fn new(mut config: NodeConfig, timer_tx: Sender<u64>) -> Result<Self> {
         let mut rng = config.rng;
         let full_id = config.full_id.unwrap_or_else(|| FullId::gen(&mut rng));
 
@@ -55,39 +48,35 @@ impl Core {
             network_params: config.network_params,
             full_id,
             quic_p2p,
-            msg_filter: Default::default(),
             msg_queue: Default::default(),
             timer: Timer::new(timer_tx),
             rng,
-            user_event_tx,
         })
     }
 
-    /*    pub fn resume(
-            network_params: NetworkParams,
-            full_id: FullId,
-            transport: Transport,
-            msg_filter: MessageFilter,
-            msg_queue: VecDeque<QueuedMessage>,
-            timer_tx: Sender<u64>,
-            user_event_tx: Sender<Event>,
-        ) -> Self {
-            Self {
-                network_params,
-                full_id,
-                transport,
-                msg_filter,
-                msg_queue,
-                timer: Timer::new(timer_tx),
-                rng: rng::new(),
-                user_event_tx,
-            }
-        }
-    */
+    /// Bootstrap to the network joining a section
+    pub async fn bootstrap(&mut self) -> Result<()> {
+        let _conn = self.quic_p2p.bootstrap().await?;
+        // TODO: obtain list of nodes and join
+        Ok(())
+    }
+
     /// Starts listening for events returning a stream where to read them from.
     pub fn listen_events(&self) -> Result<EventStream> {
         let incoming_conns = self.quic_p2p.listen()?;
         Ok(EventStream::new(incoming_conns))
+    }
+
+    pub fn network_params(&self) -> &NetworkParams {
+        &self.network_params
+    }
+
+    pub fn full_id(&self) -> &FullId {
+        &self.full_id
+    }
+
+    pub fn set_full_id(&mut self, id: FullId) {
+        self.full_id = id;
     }
 
     pub fn id(&self) -> &PublicId {
@@ -96,6 +85,11 @@ impl Core {
 
     pub fn name(&self) -> &XorName {
         self.full_id.public_id().name()
+    }
+
+    // TODO: perhaps we can expose some utitlity functions instead??
+    pub fn rng_mut(&mut self) -> &mut MainRng {
+        &mut self.rng
     }
 
     pub fn our_connection_info(&mut self) -> Result<SocketAddr> {
@@ -110,7 +104,7 @@ impl Core {
         conn_infos: &[SocketAddr],
         delivery_group_size: usize,
         msg: Bytes,
-    ) {
+    ) -> Result<()> {
         if conn_infos.len() < delivery_group_size {
             warn!(
                 "Less than delivery_group_size valid targets! delivery_group_size = {}; targets = {:?}; msg = {:10}",
@@ -128,8 +122,10 @@ impl Core {
         // initially only send to delivery_group_size targets
         for addr in conn_infos.iter().take(delivery_group_size) {
             // NetworkBytes is refcounted and cheap to clone.
-            self.send_message_to_target(addr, msg.clone()).await;
+            self.send_message_to_target(addr, msg.clone()).await?;
         }
+
+        Ok(())
     }
 
     pub async fn send_message_to_target(
@@ -152,18 +148,9 @@ impl Core {
             .await
     }
 
-    // TODO: remove this function
-    /*pub fn handle_unsent_message(
-        &mut self,
-        addr: SocketAddr,
-        msg: Bytes,
-        msg_token: Token,
-    ) -> PeerStatus {
-        self.transport
-            .target_failed(msg, msg_token, addr, &self.timer)
-    }*/
-
-    pub fn send_event(&self, event: Event) {
-        let _ = self.user_event_tx.send(event);
+    // TODO: this function needs to be removed since
+    // there shouldn't be a need to dispatch Events from here...
+    pub fn send_event(&self, _event: Event) {
+        // let _ = self.user_event_tx.send(event);
     }
 }

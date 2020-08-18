@@ -83,7 +83,7 @@ pub use self::{
     id::{FullId, P2pNode, PublicId},
     location::{DstLocation, SrcLocation},
     network_params::NetworkParams,
-    node::{Node, NodeConfig},
+    node::{EventStream, Node, NodeConfig},
     pause::PausedState,
     quic_p2p::Config as TransportConfig,
     section::SectionProofChain,

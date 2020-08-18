@@ -96,7 +96,7 @@ impl Bootstrapping {
         self.msg_backlog.push(msg.into_queued(Some(sender)))
     }
 
-    pub fn handle_bootstrap_response(
+    pub async fn handle_bootstrap_response(
         &mut self,
         core: &mut Core,
         sender: P2pNode,
@@ -135,15 +135,15 @@ impl Bootstrapping {
                     "Bootstrapping redirected to another set of peers: {:?}",
                     new_conn_infos
                 );
-                self.reconnect_to_new_section(core, new_conn_infos);
+                self.reconnect_to_new_section(core, new_conn_infos).await?;
                 Ok(None)
             }
         }
     }
 
-    pub fn send_bootstrap_request(&mut self, core: &mut Core, dst: SocketAddr) {
+    pub async fn send_bootstrap_request(&mut self, core: &mut Core, dst: SocketAddr) -> Result<()> {
         if !self.pending_requests.insert(dst) {
-            return;
+            return Ok(());
         }
 
         let token = core.timer.schedule(BOOTSTRAP_TIMEOUT);
@@ -155,10 +155,15 @@ impl Bootstrapping {
         };
 
         debug!("Sending BootstrapRequest to {}.", dst);
-        core.send_direct_message(&dst, Variant::BootstrapRequest(destination));
+        core.send_direct_message(&dst, Variant::BootstrapRequest(destination))
+            .await
     }
 
-    fn reconnect_to_new_section(&mut self, core: &mut Core, new_conn_infos: Vec<SocketAddr>) {
+    async fn reconnect_to_new_section(
+        &mut self,
+        core: &mut Core,
+        new_conn_infos: Vec<SocketAddr>,
+    ) -> Result<()> {
         // TODO???
         /*for addr in self.pending_requests.drain() {
             core.transport.disconnect(addr);
@@ -167,8 +172,10 @@ impl Bootstrapping {
         self.timeout_tokens.clear();
 
         for conn_info in new_conn_infos {
-            self.send_bootstrap_request(core, conn_info);
+            self.send_bootstrap_request(core, conn_info).await?;
         }
+
+        Ok(())
     }
 
     fn join_section(
@@ -181,7 +188,7 @@ impl Bootstrapping {
             Some(details) => *details.destination(),
             None => *core.name(),
         };
-        let old_full_id = core.full_id.clone();
+        let old_full_id = core.full_id().clone();
 
         // Use a name that will match the destination even after multiple splits
         let extra_split_count = 3;
@@ -191,13 +198,13 @@ impl Bootstrapping {
         );
 
         if !name_prefix.matches(core.name()) {
-            let new_full_id = FullId::within_range(&mut core.rng, &name_prefix.range_inclusive());
+            let new_full_id = FullId::within_range(core.rng_mut(), &name_prefix.range_inclusive());
             info!("Changing name to {}.", new_full_id.public_id().name());
-            core.full_id = new_full_id;
+            core.set_full_id(new_full_id);
         }
 
         if let Some(details) = relocate_details {
-            let payload = RelocatePayload::new(details, core.full_id.public_id(), &old_full_id)?;
+            let payload = RelocatePayload::new(details, core.id(), &old_full_id)?;
             Ok(Some(payload))
         } else {
             Ok(None)
