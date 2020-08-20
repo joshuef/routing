@@ -23,9 +23,8 @@ use crate::{
     id::{FullId, P2pNode, PublicId},
     location::{DstLocation, SrcLocation},
     log_utils,
-    messages::{EldersUpdate, Message, MessageStatus, Variant},
+    messages::{EldersUpdate, Variant},
     network_params::NetworkParams,
-    //relocation::SignedRelocateDetails,
     rng::{self, MainRng},
     section::SectionProofChain,
     section::SharedState,
@@ -113,8 +112,9 @@ impl Node {
                 }
             }
         } else {
-            info!("{} Bootstrapping a new node.", core.name());
-            core.bootstrap().await?;
+            let node_xorname = *core.name();
+            info!("{} Bootstrapping a new node.", node_xorname);
+            core.bootstrap(node_xorname).await?;
             Stage::Bootstrapping(Bootstrapping::new(None))
         };
 
@@ -125,46 +125,6 @@ impl Node {
     pub fn listen_events(&self) -> Result<EventStream> {
         self.core.listen_events()
     }
-
-    /// Pauses the node in order to be upgraded and/or restarted.
-    /// Returns `InvalidState` error if the node is not a member of any section yet.
-    /*pub fn pause(self) -> Result<PausedState> {
-        if let Stage::Approved(stage) = self.stage {
-            info!("Pause");
-
-            let state = stage.pause(self.core);
-
-            Ok(state)
-        } else {
-            Err(RoutingError::InvalidState)
-        }
-    }
-
-    /// Resume previously paused node.
-    pub fn resume(mut state: PausedState) -> (Self, Receiver<Event>) {
-        let (timer_tx, timer_rx) = crossbeam_channel::unbounded();
-        let transport_rx = state
-            .transport_rx
-            .take()
-            .expect("PausedState is incomplete");
-        let (user_event_tx, user_event_rx) = crossbeam_channel::unbounded();
-
-        let (stage, core) = Approved::resume(state, timer_tx, user_event_tx);
-
-        info!("Resume");
-
-        let node = Self {
-            stage: Stage::Approved(stage),
-            core,
-            timer_rx,
-            timer_rx_idx: 0,
-            transport_rx,
-            transport_rx_idx: 0,
-        };
-
-        (node, user_event_rx)
-    }
-    */
 
     /// Returns whether this node is running or has been terminated.
     pub fn is_running(&self) -> bool {
@@ -371,7 +331,7 @@ impl Node {
     // Input handling
     ////////////////////////////////////////////////////////////////////////////
 
-    async fn handle_connection_failure(&mut self, addr: SocketAddr) -> Result<()> {
+    /*async fn handle_connection_failure(&mut self, addr: SocketAddr) -> Result<()> {
         if let Stage::Approved(stage) = &mut self.stage {
             stage
                 .handle_connection_failure(&mut self.core, addr)
@@ -381,21 +341,7 @@ impl Node {
         }
 
         Ok(())
-    }
-
-    async fn handle_new_message(&mut self, sender: SocketAddr, bytes: Bytes) {
-        let msg = match Message::from_bytes(&bytes) {
-            Ok(msg) => msg,
-            Err(error) => {
-                debug!("Failed to deserialize message: {:?}", error);
-                return;
-            }
-        };
-
-        if let Err(error) = self.try_handle_message(sender, msg).await {
-            debug!("Failed to handle message: {:?}", error);
-        }
-    }
+    }*/
 
     // TODO: handle lost peer???
     /*fn handle_unsent_message(&mut self, addr: SocketAddr, msg: Bytes, msg_token: Token) {
@@ -405,100 +351,30 @@ impl Node {
         }
     }*/
 
-    async fn handle_timeout(&mut self, token: u64) -> Result<()> {
-        // TODO???
-        /*if self.core.transport.handle_timeout(token) {
+    /*async fn handle_timeout(&mut self, token: u64) -> Result<()> {
+        if self.core.transport.handle_timeout(token) {
             return;
-        }*/
+        }
 
         match &mut self.stage {
             Stage::Bootstrapping(stage) => stage.handle_timeout(&mut self.core, token),
-            Stage::Joining(stage) => {} //stage.handle_timeout(&mut self.core, token).await?,
+            Stage::Joining(stage) => stage.handle_timeout(&mut self.core, token).await?,
             Stage::Approved(stage) => stage.handle_timeout(&mut self.core, token).await?,
             Stage::Terminated => {}
         }
 
         Ok(())
-    }
+    }*/
 
-    fn handle_peer_lost(&mut self, peer_addr: SocketAddr) {
+    /*fn handle_peer_lost(&mut self, peer_addr: SocketAddr) {
         if let Stage::Approved(stage) = &mut self.stage {
             stage.handle_peer_lost(&self.core, peer_addr);
         }
-    }
+    }*/
 
     ////////////////////////////////////////////////////////////////////////////
     // Message handling
     ////////////////////////////////////////////////////////////////////////////
-
-    async fn try_handle_message(&mut self, sender: SocketAddr, msg: Message) -> Result<()> {
-        trace!("try handle message {:?}", msg);
-
-        self.try_relay_message(&msg).await?;
-
-        if !self.in_dst_location(msg.dst()) {
-            return Ok(());
-        }
-
-        // TODO: filter messages which are already handled???
-        /*if self.core.msg_filter.contains_incoming(&msg) {
-            trace!("not handling message - already handled: {:?}", msg);
-            return Ok(());
-        }*/
-
-        match self.decide_message_status(&msg)? {
-            MessageStatus::Useful => {
-                //self.core.msg_filter.insert_incoming(&msg);
-                self.handle_message(sender, msg).await
-            }
-            MessageStatus::Untrusted => {
-                debug!("Untrusted message from {}: {:?} ", sender, msg);
-                self.handle_untrusted_message(sender, msg).await
-            }
-            MessageStatus::Unknown => {
-                debug!("Unknown message from {}: {:?} ", sender, msg);
-                //self.handle_unknown_message(sender, msg).await
-                Ok(())
-            }
-            MessageStatus::Useless => {
-                debug!("Useless message from {}: {:?}", sender, msg);
-                Ok(())
-            }
-        }
-    }
-
-    async fn try_relay_message(&mut self, msg: &Message) -> Result<()> {
-        if !self.in_dst_location(msg.dst()) || msg.dst().is_section() {
-            // Relay closer to the destination or broadcast to the rest of our section.
-            self.relay_message(msg).await
-        } else {
-            Ok(())
-        }
-    }
-
-    async fn relay_message(&mut self, msg: &Message) -> Result<()> {
-        match &mut self.stage {
-            Stage::Approved(stage) => stage.relay_message(&mut self.core, msg).await,
-            Stage::Bootstrapping(_) | Stage::Joining(_) | Stage::Terminated => Ok(()),
-        }
-    }
-
-    fn decide_message_status(&self, msg: &Message) -> Result<MessageStatus> {
-        match &self.stage {
-            Stage::Bootstrapping(stage) => stage.decide_message_status(msg),
-            Stage::Joining(stage) => stage.decide_message_status(msg),
-            Stage::Approved(stage) => stage.decide_message_status(self.core.id(), msg),
-            Stage::Terminated => Ok(MessageStatus::Useless),
-        }
-    }
-
-    async fn handle_message(&mut self, sender: SocketAddr, msg: Message) -> Result<()> {
-        if let Stage::Approved(stage) = &mut self.stage {
-            stage.update_section_knowledge(&mut self.core, &msg).await?;
-        }
-
-        Ok(())
-    }
 
     /*async fn dispatch_message(&mut self, sender: Option<SocketAddr>, msg: Message) -> Result<()> {
         trace!("Got {:?}", msg);
@@ -702,32 +578,6 @@ impl Node {
                 }
             },
             Stage::Terminated => unreachable!(),
-        }
-
-        Ok(())
-    }*/
-
-    async fn handle_untrusted_message(&mut self, sender: SocketAddr, msg: Message) -> Result<()> {
-        match &self.stage {
-            Stage::Approved(stage) => {
-                stage
-                    .handle_untrusted_message(&mut self.core, Some(sender), msg)
-                    .await
-            }
-            Stage::Bootstrapping(_) | Stage::Joining(_) | Stage::Terminated => unreachable!(),
-        }
-    }
-
-    /*async fn handle_unknown_message(&mut self, sender: SocketAddr, msg: Message) -> Result<()> {
-        match &mut self.stage {
-            Stage::Bootstrapping(stage) => stage.handle_unknown_message(sender, msg),
-            Stage::Joining(stage) => stage.handle_unknown_message(sender, msg),
-            Stage::Approved(stage) => {
-                stage
-                    .handle_unknown_message(&mut self.core, Some(sender), msg.to_bytes())
-                    .await?
-            }
-            Stage::Terminated => (),
         }
 
         Ok(())

@@ -18,7 +18,7 @@ use crate::{
 };
 use bytes::Bytes;
 use hex_fmt::HexFmt;
-use quic_p2p::QuicP2p;
+use quic_p2p::{Connection, QuicP2p};
 use std::net::SocketAddr;
 use xor_name::XorName;
 
@@ -47,16 +47,18 @@ impl Core {
     }
 
     /// Bootstrap to the network joining a section
-    pub async fn bootstrap(&mut self) -> Result<()> {
-        let _conn = self.quic_p2p.bootstrap().await?;
-        // TODO: obtain list of nodes and join
-        Ok(())
+    pub async fn bootstrap(&mut self, xorname: XorName) -> Result<()> {
+        let mut conn = self.quic_p2p.bootstrap().await?;
+
+        debug!("Sending BootstrapRequest to {}.", conn.remote_address());
+        self.send_direct_message_on_conn(&mut conn, Variant::BootstrapRequest(xorname))
+            .await
     }
 
     /// Starts listening for events returning a stream where to read them from.
     pub fn listen_events(&self) -> Result<EventStream> {
         let incoming_conns = self.quic_p2p.listen()?;
-        Ok(EventStream::new(incoming_conns))
+        Ok(EventStream::new(incoming_conns, *self.name()))
     }
 
     pub fn network_params(&self) -> &NetworkParams {
@@ -144,5 +146,17 @@ impl Core {
     // there shouldn't be a need to dispatch Events from here...
     pub fn send_event(&self, _event: Event) {
         // let _ = self.user_event_tx.send(event);
+    }
+
+    // Private helper to send a message using the given quic-p2p Connection
+    async fn send_direct_message_on_conn(
+        &mut self,
+        conn: &mut Connection,
+        variant: Variant,
+    ) -> Result<()> {
+        let message = Message::single_src(&self.full_id, DstLocation::Direct, variant, None, None)?;
+        conn.send_only(message.to_bytes())
+            .await
+            .map_err(RoutingError::Network)
     }
 }
