@@ -6,7 +6,7 @@
 // KIND, either express or implied. Please review the Licences for the specific language governing
 // permissions and limitations relating to use of the SAFE Network Software.
 
-use crate::quic_p2p::QuicP2pError;
+use crate::quic_p2p::Error as QuicP2pError;
 use err_derive::Error;
 
 /// The type returned by the routing message handling methods.

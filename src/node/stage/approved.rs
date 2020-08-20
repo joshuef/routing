@@ -158,20 +158,6 @@ impl Approved {
             .elders
             .contains_key(core.name());
 
-    let stage = Self {
-        consensus_engine: state.consensus_engine,
-        shared_state: state.shared_state,
-        section_keys_provider: state.section_keys_provider,
-        message_accumulator: state.msg_accumulator,
-        vote_accumulator: state.vote_accumulator,
-        gossip_timer_token,
-        section_update_barrier: state.section_update_barrier,
-        // TODO: these fields should come from PausedState too
-        churn_in_progress: false,
-        members_changed: false,
-        dkg_voter: Default::default(),
-    };
-
         let stage = Self {
             consensus_engine: state.consensus_engine,
             shared_state: state.shared_state,
@@ -184,7 +170,6 @@ impl Approved {
             churn_in_progress: false,
             members_changed: false,
             dkg_voter: Default::default(),
-            bounced_unknown_messages: Default::default(),
         };
 
         (stage, core)
@@ -321,7 +306,7 @@ impl Approved {
         }
     }
 
-    pub async fn handle_timeout(&mut self, core: &mut Core, token: u64) -> Result<()> {
+    /*pub async fn handle_timeout(&mut self, core: &mut Core, token: u64) -> Result<()> {
         if self.gossip_timer_token == Some(token) {
             if self.is_our_elder(core.id()) {
                 //self.gossip_timer_token =
@@ -335,7 +320,7 @@ impl Approved {
         }
 
         Ok(())
-    }
+    }*/
 
     async fn check_dkg(&mut self, core: &mut Core) {
         let (completed, mut backlog_votes) = self.dkg_voter.check_dkg();

@@ -17,7 +17,7 @@ use crate::{
 };
 
 use fxhash::FxHashSet;
-use std::{collections::HashMap, iter, net::SocketAddr};
+use std::{iter, net::SocketAddr};
 use xor_name::Prefix;
 
 /// Time after which bootstrap is cancelled (and possibly retried).
@@ -27,7 +27,6 @@ pub const BOOTSTRAP_TIMEOUT: Duration = Duration::from_secs(20);
 pub(crate) struct Bootstrapping {
     // Using `FxHashSet` for deterministic iteration order.
     pending_requests: FxHashSet<SocketAddr>,
-    timeout_tokens: HashMap<u64, SocketAddr>,
     relocate_details: Option<SignedRelocateDetails>,
 }
 
@@ -35,29 +34,7 @@ impl Bootstrapping {
     pub fn new(relocate_details: Option<SignedRelocateDetails>) -> Self {
         Self {
             pending_requests: Default::default(),
-            timeout_tokens: Default::default(),
             relocate_details,
-        }
-    }
-
-    pub fn handle_timeout(&mut self, core: &mut Core, token: u64) {
-        let peer_addr = if let Some(peer_addr) = self.timeout_tokens.remove(&token) {
-            peer_addr
-        } else {
-            return;
-        };
-
-        debug!("Timeout when trying to bootstrap against {}.", peer_addr);
-
-        if !self.pending_requests.remove(&peer_addr) {
-            return;
-        }
-
-        //TODO?? core.transport.disconnect(peer_addr);
-
-        if self.pending_requests.is_empty() {
-            // Rebootstrap
-            //TODO??  core.transport.bootstrap();
         }
     }
 
@@ -135,20 +112,16 @@ impl Bootstrapping {
     }
 
     pub async fn send_bootstrap_request(&mut self, core: &mut Core, dst: SocketAddr) -> Result<()> {
-        if !self.pending_requests.insert(dst) {
-            return Ok(());
-        }
-
         //let token = core.timer.schedule(BOOTSTRAP_TIMEOUT);
         //let _ = self.timeout_tokens.insert(token, dst);
 
-        let destination = match &self.relocate_details {
+        let xorname = match &self.relocate_details {
             Some(details) => *details.destination(),
             None => *core.name(),
         };
 
         debug!("Sending BootstrapRequest to {}.", dst);
-        core.send_direct_message(&dst, Variant::BootstrapRequest(destination))
+        core.send_direct_message(&dst, Variant::BootstrapRequest(xorname))
             .await
     }
 
@@ -161,8 +134,6 @@ impl Bootstrapping {
         /*for addr in self.pending_requests.drain() {
             core.transport.disconnect(addr);
         }*/
-
-        self.timeout_tokens.clear();
 
         for conn_info in new_conn_infos {
             self.send_bootstrap_request(core, conn_info).await?;
