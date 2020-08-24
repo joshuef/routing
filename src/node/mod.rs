@@ -14,26 +14,27 @@ mod tests;
 #[cfg(feature = "mock_base")]
 pub use self::stage::{BOOTSTRAP_TIMEOUT, JOIN_TIMEOUT};
 
-pub use self::event_stream::EventStream;
-use self::stage::{Approved, Bootstrapping, JoinParams, Joining, RelocateParams, Stage};
+pub(crate) use self::stage::{Approved, Bootstrapping, JoinParams, Joining, RelocateParams, Stage};
 use crate::{
-    core::Core,
+    comm::Comm,
     error::{Result, RoutingError},
-    event::{Connected, Event},
+    event::Connected,
     id::{FullId, P2pNode, PublicId},
     location::{DstLocation, SrcLocation},
     log_utils,
     messages::{EldersUpdate, Variant},
     network_params::NetworkParams,
     rng::{self, MainRng},
-    section::SectionProofChain,
-    section::SharedState,
+    section::{SectionProofChain, SharedState},
     TransportConfig,
 };
+pub use event_stream::EventStream;
 
 use bytes::Bytes;
+use futures::lock::Mutex;
 use itertools::Itertools;
 use std::net::SocketAddr;
+use std::sync::Arc;
 use xor_name::{Prefix, XorName};
 
 #[cfg(all(test, feature = "mock"))]
@@ -79,8 +80,8 @@ impl Default for NodeConfig {
 /// `Node` or as a part of a section or group location. Their `src` argument indicates that
 /// role, and can be any [`SrcLocation`](enum.SrcLocation.html).
 pub struct Node {
-    core: Core,
-    stage: Stage,
+    stage: Arc<Mutex<Stage>>,
+    full_id: FullId,
 }
 
 impl Node {
@@ -93,47 +94,55 @@ impl Node {
     /// Returns the node itself, the user event receiver and the client network
     /// event receiver.
     pub async fn new(config: NodeConfig) -> Result<Self> {
-        let first = config.first;
-        let mut core = Core::new(config)?;
+        let mut rng = config.rng;
+        let as_first_node = config.first;
+        let full_id = config.full_id.unwrap_or_else(|| FullId::gen(&mut rng));
+        let network_params = config.network_params;
+        let transport_config = config.transport_config;
 
-        let stage = if first {
-            match Approved::first(&mut core) {
+        let comm = Comm::new(transport_config)?;
+        let node_name = full_id.public_id().name().clone();
+
+        let stage = if as_first_node {
+            match Approved::first(comm, full_id.clone(), network_params, rng).await {
                 Ok(stage) => {
-                    info!("{} Started a new network as a seed node.", core.name());
+                    info!("{} Started a new network as a seed node.", node_name);
                     Stage::Approved(stage)
                 }
                 Err(error) => {
-                    error!(
-                        "{} Failed to start the first node: {:?}",
-                        core.name(),
-                        error
-                    );
+                    error!("{} Failed to start the first node: {:?}", node_name, error);
                     Stage::Terminated
                 }
             }
         } else {
-            let node_xorname = *core.name();
-            info!("{} Bootstrapping a new node.", node_xorname);
-            core.bootstrap(node_xorname).await?;
-            Stage::Bootstrapping(Bootstrapping::new(None))
+            info!("{} Bootstrapping a new node.", node_name);
+            Stage::Bootstrapping(Bootstrapping::new(None, full_id.clone(), rng, comm).await?)
         };
 
-        Ok(Self { stage, core })
+        Ok(Self {
+            stage: Arc::new(Mutex::new(stage)),
+            full_id,
+        })
     }
 
     /// Starts listening for events returning a stream where to read them from.
-    pub fn listen_events(&self) -> Result<EventStream> {
-        self.core.listen_events()
+    pub async fn listen_events(&self) -> Result<EventStream> {
+        let incoming_conns = futures::executor::block_on(self.stage.lock()).listen_events()?;
+        Ok(EventStream::new(
+            Arc::clone(&self.stage),
+            incoming_conns,
+            *self.full_id.public_id().name(),
+        ))
     }
 
     /// Returns whether this node is running or has been terminated.
     pub fn is_running(&self) -> bool {
-        !matches!(self.stage, Stage::Terminated)
+        futures::executor::block_on(self.stage.lock()).is_running()
     }
 
     /// Returns the `PublicId` of this node.
     pub fn id(&self) -> &PublicId {
-        self.core.id()
+        self.full_id.public_id()
     }
 
     /// The name of this node.
@@ -143,22 +152,20 @@ impl Node {
 
     /// Returns connection info of this node.
     pub fn our_connection_info(&mut self) -> Result<SocketAddr> {
-        self.core.our_connection_info()
+        futures::executor::block_on(self.stage.lock()).our_connection_info()
     }
 
     /// Our `Prefix` once we are a part of the section.
-    pub fn our_prefix(&self) -> Option<&Prefix> {
-        if let Stage::Approved(stage) = &self.stage {
-            Some(stage.shared_state.our_prefix())
-        } else {
-            None
-        }
+    pub fn our_prefix(&self) -> Option<Prefix> {
+        futures::executor::block_on(self.stage.lock())
+            .approved()
+            .map(|s| s.shared_state.our_prefix().clone())
     }
 
     /// Finds out if the given XorName matches our prefix. Returns error if we don't have a prefix
     /// because we haven't joined any section yet.
     pub fn matches_our_prefix(&self, name: &XorName) -> Result<bool> {
-        if let Some(prefix) = self.our_prefix() {
+        if let Some(prefix) = futures::executor::block_on(self.stage.lock()).our_prefix() {
             Ok(prefix.matches(name))
         } else {
             Err(RoutingError::InvalidState)
@@ -166,8 +173,10 @@ impl Node {
     }
 
     /// Returns whether the node is Elder.
-    pub fn is_elder(&self) -> bool {
+    pub async fn is_elder(&self) -> bool {
         self.stage
+            .lock()
+            .await
             .approved()
             .map(|stage| {
                 stage
@@ -175,66 +184,72 @@ impl Node {
                     .sections
                     .our()
                     .elders
-                    .contains_key(self.core.name())
+                    .contains_key(self.name())
             })
             .unwrap_or(false)
     }
 
     /// Returns the information of all the current section elders.
-    pub fn our_elders(&self) -> impl Iterator<Item = &P2pNode> {
+    /*pub fn our_elders(&self) -> impl Iterator<Item = &P2pNode> {
         self.stage
             .approved()
             .into_iter()
             .flat_map(|stage| stage.shared_state.sections.our_elders())
+    }*/
+    pub fn our_elders(&self) -> Vec<P2pNode> {
+        vec![]
     }
 
     /// Returns the elders of our section sorted by their distance to `name` (closest first).
-    pub fn our_elders_sorted_by_distance_to(&self, name: &XorName) -> Vec<&P2pNode> {
+    pub fn our_elders_sorted_by_distance_to(&self, name: &XorName) -> Vec<P2pNode> {
         self.our_elders()
-            .sorted_by(|lhs, rhs| name.cmp_distance(lhs.name(), rhs.name()))
-            .collect()
+        //.sorted_by(|lhs, rhs| name.cmp_distance(lhs.name(), rhs.name()))
+        //.collect()
     }
 
     /// Returns the information of all the current section adults.
-    pub fn our_adults(&self) -> impl Iterator<Item = &P2pNode> {
-        self.stage
+    /*pub async fn our_adults(&self) -> impl Iterator<Item = &P2pNode> {
+        self.stage.lock().await
             .approved()
             .into_iter()
             .flat_map(|stage| stage.shared_state.our_adults())
+    }*/
+    pub fn our_adults(&self) -> Vec<P2pNode> {
+        vec![]
     }
 
     /// Returns the adults of our section sorted by their distance to `name` (closest first).
     /// If we are not elder or if there are no adults in the section, returns empty vec.
-    pub fn our_adults_sorted_by_distance_to(&self, name: &XorName) -> Vec<&P2pNode> {
+    pub fn our_adults_sorted_by_distance_to(&self, name: &XorName) -> Vec<P2pNode> {
         self.our_adults()
-            .sorted_by(|lhs, rhs| name.cmp_distance(lhs.name(), rhs.name()))
-            .collect()
+        //.sorted_by(|lhs, rhs| name.cmp_distance(lhs.name(), rhs.name()))
+        //.collect()
     }
 
     /// Checks whether the given location represents self.
     pub fn in_dst_location(&self, dst: &DstLocation) -> bool {
-        match &self.stage {
+        // FIXME
+        /*let stage = futures::executor::block_on(self.stage.lock());
+        match stage {
             Stage::Bootstrapping(_) | Stage::Joining(_) => match dst {
-                DstLocation::Node(name) => name == self.core.name(),
+                DstLocation::Node(name) => name == self.name(),
                 DstLocation::Section(_) => false,
                 DstLocation::Direct => true,
                 DstLocation::Client(_) => false,
             },
-            Stage::Approved(stage) => {
-                dst.contains(self.core.name(), stage.shared_state.our_prefix())
-            }
+            Stage::Approved(stage) => dst.contains(self.name(), stage.shared_state.our_prefix()),
             Stage::Terminated => false,
-        }
+        }*/
+        true
     }
 
     /// Vote for a user-defined event.
     /// Returns `InvalidState` error if we are not an elder.
     pub fn vote_for_user_event(&mut self, event: Vec<u8>) -> Result<()> {
-        let our_id = self.core.id();
-        if let Some(stage) = self
-            .stage
+        let our_id = self.id().clone();
+        if let Some(stage) = futures::executor::block_on(self.stage.lock())
             .approved_mut()
-            .filter(|stage| stage.is_our_elder(our_id))
+            .filter(|stage| stage.is_our_elder(&our_id))
         {
             stage.vote_for_user_event(event);
             Ok(())
@@ -254,73 +269,70 @@ impl Node {
             return Err(RoutingError::BadLocation);
         }
 
-        let _log_ident = self.set_log_ident();
+        //let _log_ident = self.set_log_ident();
 
-        match &mut self.stage {
-            Stage::Bootstrapping(_) | Stage::Joining(_) | Stage::Terminated => {
-                Err(RoutingError::InvalidState)
-            }
-            Stage::Approved(stage) => {
-                stage
-                    .send_routing_message(
-                        &mut self.core,
-                        src,
-                        dst,
-                        Variant::UserMessage(content),
-                        None,
-                    )
+        match self.stage.lock().await.approved_mut() {
+            None => Err(RoutingError::InvalidState),
+            Some(approved_stage) => {
+                approved_stage
+                    .send_routing_message(src, dst, Variant::UserMessage(content), None)
                     .await
             }
         }
     }
 
     /// Send a message to a client peer.
+    // TODO: can we remove this and support it with DstLocation and send_message ??
     pub async fn send_message_to_client(
         &mut self,
         peer_addr: SocketAddr,
         msg: Bytes,
     ) -> Result<()> {
-        self.core.send_message_to_target(&peer_addr, msg).await
+        self.stage
+            .lock()
+            .await
+            .send_message_to_target(&peer_addr, msg)
+            .await
     }
 
     /// Disconnect form a client peer.
+    // TODO: remove function??
     pub fn disconnect_from_client(&mut self, peer_addr: SocketAddr) -> Result<()> {
-        // TODO: remove funciton??
         // self.core.transport.disconnect(peer_addr);
         Ok(())
     }
 
     /// Returns the current BLS public key set or `RoutingError::InvalidState` if we are not joined
     /// yet.
-    pub fn public_key_set(&self) -> Result<&bls::PublicKeySet> {
-        self.stage
+    pub fn public_key_set(&self) -> Result<bls::PublicKeySet> {
+        futures::executor::block_on(self.stage.lock())
             .approved()
             .and_then(|stage| stage.section_key_share())
-            .map(|share| &share.public_key_set)
+            .map(|share| share.public_key_set.clone())
             .ok_or(RoutingError::InvalidState)
     }
 
     /// Returns the current BLS secret key share or `RoutingError::InvalidState` if we are not
     /// elder.
-    pub fn secret_key_share(&self) -> Result<&bls::SecretKeyShare> {
-        self.stage
+    pub fn secret_key_share(&self) -> Result<bls::SecretKeyShare> {
+        futures::executor::block_on(self.stage.lock())
             .approved()
             .and_then(|stage| stage.section_key_share())
-            .map(|share| &share.secret_key_share)
+            .map(|share| share.secret_key_share.clone())
             .ok_or(RoutingError::InvalidState)
     }
 
     /// Returns our section proof chain, or `None` if we are not joined yet.
-    pub fn our_history(&self) -> Option<&SectionProofChain> {
-        self.stage
+    pub fn our_history(&self) -> Option<SectionProofChain> {
+        futures::executor::block_on(self.stage.lock())
             .approved()
-            .map(|stage| &stage.shared_state.our_history)
+            .map(|stage| stage.shared_state.our_history.clone())
     }
 
     /// Returns our index in the current BLS group or `RoutingError::InvalidState` if section key was
     /// not generated yet.
     pub fn our_index(&self) -> Result<usize> {
-        self.stage
+        futures::executor::block_on(self.stage.lock())
             .approved()
             .and_then(|stage| stage.section_key_share())
             .map(|share| share.index)
@@ -373,217 +385,6 @@ impl Node {
     }*/
 
     ////////////////////////////////////////////////////////////////////////////
-    // Message handling
-    ////////////////////////////////////////////////////////////////////////////
-
-    /*async fn dispatch_message(&mut self, sender: Option<SocketAddr>, msg: Message) -> Result<()> {
-        trace!("Got {:?}", msg);
-
-        match &mut self.stage {
-            Stage::Bootstrapping(stage) => match msg.variant() {
-                Variant::BootstrapResponse(response) => {
-                    if let Some(params) = stage
-                        .handle_bootstrap_response(
-                            &mut self.core,
-                            msg.src().to_sender_node(sender)?,
-                            response.clone(),
-                        )
-                        .await?
-                    {
-                        self.join(params).await?;
-                    }
-                }
-                _ => unreachable!(),
-            },
-            Stage::Joining(stage) => match msg.variant() {
-                Variant::BootstrapResponse(BootstrapResponse::Join {
-                    elders_info,
-                    section_key,
-                }) => {
-                    stage
-                        .handle_bootstrap_response(
-                            &mut self.core,
-                            msg.src().to_sender_node(sender)?,
-                            elders_info.clone(),
-                            *section_key,
-                        )
-                        .await?
-                }
-                Variant::NodeApproval(payload) => {
-                    let connect_type = stage.connect_type();
-                    let msg_backlog = stage.take_message_backlog();
-                    let section_key = *msg.proof_chain_last_key()?;
-
-                    self.approve(connect_type, msg_backlog, section_key, payload.clone())?
-                }
-                _ => unreachable!(),
-            },
-            Stage::Approved(stage) => match msg.variant() {
-                Variant::NeighbourInfo { elders_info, .. } => {
-                    msg.dst().check_is_section()?;
-                    stage.handle_neighbour_info(
-                        &mut self.core,
-                        elders_info.value.clone(),
-                        *msg.proof_chain_last_key()?,
-                    )?;
-                }
-                Variant::EldersUpdate(payload) => {
-                    let section_key = *msg.proof_chain_last_key()?;
-                    stage.handle_elders_update(&mut self.core, section_key, payload.clone())?
-                }
-                Variant::Promote {
-                    shared_state,
-                    parsec_version,
-                } => {
-                    stage
-                        .handle_promote(&mut self.core, shared_state.clone(), *parsec_version)
-                        .await?
-                }
-                Variant::NotifyLagging {
-                    shared_state,
-                    parsec_version,
-                } => {
-                    stage
-                        .handle_lagging(&mut self.core, shared_state.clone(), *parsec_version)
-                        .await?
-                }
-                Variant::Relocate(_) => {
-                    msg.src().check_is_section()?;
-                    let signed_relocate = SignedRelocateDetails::new(msg)?;
-                    if let Some(params) = stage.handle_relocate(&mut self.core, signed_relocate) {
-                        self.relocate(params).await?;
-                    }
-                }
-                Variant::MessageSignature(accumulating_msg) => {
-                    let result = stage
-                        .handle_message_signature(
-                            &mut self.core,
-                            *accumulating_msg.clone(),
-                            *msg.src().as_node()?,
-                        )
-                        .await;
-                    if let Some(addr) = sender {
-                        stage
-                            .check_lagging(&mut self.core, &addr, &accumulating_msg.proof_share)
-                            .await?;
-                    }
-                    result?
-                }
-                Variant::BootstrapRequest(name) => {
-                    stage
-                        .handle_bootstrap_request(
-                            &mut self.core,
-                            msg.src().to_sender_node(sender)?,
-                            *name,
-                        )
-                        .await?
-                }
-                Variant::JoinRequest(join_request) => {
-                    stage
-                        .handle_join_request(
-                            &mut self.core,
-                            msg.src().to_sender_node(sender)?,
-                            *join_request.clone(),
-                        )
-                        .await?
-                }
-                Variant::ParsecRequest(version, request) => {
-                    stage
-                        .handle_parsec_request(
-                            &mut self.core,
-                            *version,
-                            request.clone(),
-                            msg.src().to_sender_node(sender)?,
-                        )
-                        .await?;
-                }
-                Variant::ParsecResponse(version, response) => {
-                    stage
-                        .handle_parsec_response(
-                            &mut self.core,
-                            *version,
-                            response.clone(),
-                            *msg.src().as_node()?,
-                        )
-                        .await?;
-                }
-                Variant::UserMessage(content) => {
-                    self.core.send_event(Event::MessageReceived {
-                        content: content.clone(),
-                        src: msg.src().src_location(),
-                        dst: *msg.dst(),
-                    });
-                }
-                Variant::BouncedUntrustedMessage(message) => stage
-                    .handle_bounced_untrusted_message(
-                        &mut self.core,
-                        msg.src().to_sender_node(sender)?,
-                        *msg.dst_key(),
-                        *message.clone(),
-                    ),
-                Variant::BouncedUnknownMessage { src_key, message } => stage
-                    .handle_bounced_unknown_message(
-                        &mut self.core,
-                        msg.src().to_sender_node(sender)?,
-                        message.clone(),
-                        src_key,
-                    ),
-                Variant::DKGMessage {
-                    participants,
-                    section_key_index,
-                    message,
-                } => {
-                    stage
-                        .handle_dkg_message(
-                            &mut self.core,
-                            participants.clone(),
-                            *section_key_index,
-                            message.clone(),
-                            *msg.src().as_node()?,
-                        )
-                        .await?;
-                }
-                Variant::DKGOldElders {
-                    participants,
-                    section_key_index,
-                    public_key_set,
-                } => {
-                    stage
-                        .handle_dkg_old_elders(
-                            &mut self.core,
-                            participants.clone(),
-                            *section_key_index,
-                            public_key_set.clone(),
-                            *msg.src().as_node()?,
-                        )
-                        .await?;
-                }
-                Variant::Vote {
-                    content,
-                    proof_share,
-                } => {
-                    let result = stage
-                        .handle_unordered_vote(&mut self.core, content.clone(), proof_share.clone())
-                        .await;
-                    if let Some(addr) = sender {
-                        stage
-                            .check_lagging(&mut self.core, &addr, proof_share)
-                            .await?;
-                    }
-
-                    result?
-                }
-                Variant::NodeApproval(_) | Variant::BootstrapResponse(_) | Variant::Ping => {
-                    unreachable!()
-                }
-            },
-            Stage::Terminated => unreachable!(),
-        }
-
-        Ok(())
-    }*/
-
-    ////////////////////////////////////////////////////////////////////////////
     // Transitions
     ////////////////////////////////////////////////////////////////////////////
 
@@ -595,15 +396,16 @@ impl Node {
             relocate_payload,
         } = params;
 
+        /*let mut core = self.core.lock().await;
         self.stage = Stage::Joining(
-            Joining::new(&mut self.core, elders_info, section_key, relocate_payload).await?,
-        );
+            Joining::new(&mut core, elders_info, section_key, relocate_payload).await?,
+        );*/
 
         Ok(())
     }
 
     // Transition from Joining to Approved
-    fn approve(
+    async fn approve(
         &mut self,
         connect_type: Connected,
         section_key: bls::PublicKey,
@@ -614,17 +416,16 @@ impl Node {
             elders_update.elders_info.value.prefix,
         );
 
-        let shared_state = SharedState::new(section_key, elders_update.elders_info);
-        let stage = Approved::new(
-            &mut self.core,
-            shared_state,
-            elders_update.parsec_version,
-            None,
-        )?;
-        self.stage = Stage::Approved(stage);
+        /*        let shared_state = SharedState::new(section_key, elders_update.elders_info);
+                let mut core = self.core.lock().await;
+                let stage = Approved::new(&mut core, shared_state, elders_update.parsec_version, None)?;
+                self.stage = Stage::Approved(stage);
 
-        self.core.send_event(Event::Connected(connect_type));
-
+                self.core
+                    .lock()
+                    .await
+                    .send_event(Event::Connected(connect_type));
+        */
         Ok(())
     }
 
@@ -635,21 +436,20 @@ impl Node {
             details,
         } = params;
 
-        let mut stage = Bootstrapping::new(Some(details));
+        /*let mut stage = Bootstrapping::new(Some(details));
 
+        let mut core = self.core.lock().await;
         for conn_info in conn_infos {
-            stage
-                .send_bootstrap_request(&mut self.core, conn_info)
-                .await?;
+            stage.send_bootstrap_request(&mut core, conn_info).await?;
         }
 
-        self.stage = Stage::Bootstrapping(stage);
+        self.stage = Stage::Bootstrapping(stage);*/
         Ok(())
     }
 
-    fn set_log_ident(&self) -> log_utils::Guard {
+    /*async fn set_log_ident(&self) -> log_utils::Guard {
         use std::fmt::Write;
-        log_utils::set_ident(|buffer| match &self.stage {
+        log_utils::set_ident(|buffer| match &self.stage.lock().await {
             Stage::Bootstrapping(_) => write!(buffer, "{}(?) ", self.name()),
             Stage::Joining(stage) => write!(
                 buffer,
@@ -658,11 +458,11 @@ impl Node {
                 stage.target_section_elders_info().prefix,
             ),
             Stage::Approved(stage) => {
-                if stage.is_our_elder(self.core.id()) {
+                if stage.is_our_elder(self.id()) {
                     write!(
                         buffer,
                         "{}({:b}v{}!) ",
-                        self.core.name(),
+                        self.name(),
                         stage.shared_state.our_prefix(),
                         stage.shared_state.our_history.last_key_index()
                     )
@@ -670,14 +470,14 @@ impl Node {
                     write!(
                         buffer,
                         "{}({:b}) ",
-                        self.core.name(),
+                        self.name(),
                         stage.shared_state.our_prefix()
                     )
                 }
             }
             Stage::Terminated => write!(buffer, "[terminated]"),
         })
-    }
+    }*/
 }
 
 #[cfg(feature = "mock_base")]
