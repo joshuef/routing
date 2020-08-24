@@ -9,84 +9,43 @@
 use crate::{
     error::{Result, RoutingError},
     event::Event,
-    id::{FullId, PublicId},
+    id::FullId,
     location::DstLocation,
     messages::{Message, Variant},
-    network_params::NetworkParams,
-    node::{event_stream::EventStream, NodeConfig},
-    rng::MainRng,
 };
 use bytes::Bytes;
 use hex_fmt::HexFmt;
-use quic_p2p::{Connection, QuicP2p};
+use quic_p2p::{Config, Connection, IncomingConnections, QuicP2p};
 use std::net::SocketAddr;
-use xor_name::XorName;
 
-// Core components of the node.
-pub(crate) struct Core {
-    network_params: NetworkParams,
-    full_id: FullId,
+// Communication component of the node to interact with other nodes.
+pub(crate) struct Comm {
     quic_p2p: QuicP2p,
-    rng: MainRng,
 }
 
-impl Core {
-    pub fn new(mut config: NodeConfig) -> Result<Self> {
-        let mut rng = config.rng;
-        let full_id = config.full_id.unwrap_or_else(|| FullId::gen(&mut rng));
+impl Comm {
+    pub fn new(transport_config: Config) -> Result<Self> {
+        let quic_p2p = QuicP2p::with_config(Some(transport_config), Default::default(), true)?;
 
-        let quic_p2p =
-            QuicP2p::with_config(Some(config.transport_config), Default::default(), true)?;
-
-        Ok(Self {
-            network_params: config.network_params,
-            full_id,
-            quic_p2p,
-            rng,
-        })
+        Ok(Self { quic_p2p })
     }
 
-    /// Bootstrap to the network joining a section
-    pub async fn bootstrap(&mut self, xorname: XorName) -> Result<()> {
-        let mut conn = self.quic_p2p.bootstrap().await?;
-
-        debug!("Sending BootstrapRequest to {}.", conn.remote_address());
-        self.send_direct_message_on_conn(&mut conn, Variant::BootstrapRequest(xorname))
+    /// Bootstrap to the network returning the connection to a node
+    pub async fn bootstrap(&mut self) -> Result<Connection> {
+        self.quic_p2p
+            .bootstrap()
             .await
+            .map_err(|err| RoutingError::ToBeDefined(format!("{}", err)))
     }
 
     /// Starts listening for events returning a stream where to read them from.
-    pub fn listen_events(&self) -> Result<EventStream> {
-        let incoming_conns = self.quic_p2p.listen()?;
-        Ok(EventStream::new(incoming_conns, *self.name()))
+    pub fn listen_events(&self) -> Result<IncomingConnections> {
+        self.quic_p2p.listen().map_err(|err| {
+            RoutingError::ToBeDefined(format!("Failed to start listening for messages: {}", err))
+        })
     }
 
-    pub fn network_params(&self) -> &NetworkParams {
-        &self.network_params
-    }
-
-    pub fn full_id(&self) -> &FullId {
-        &self.full_id
-    }
-
-    pub fn set_full_id(&mut self, id: FullId) {
-        self.full_id = id;
-    }
-
-    pub fn id(&self) -> &PublicId {
-        self.full_id.public_id()
-    }
-
-    pub fn name(&self) -> &XorName {
-        self.full_id.public_id().name()
-    }
-
-    // TODO: perhaps we can expose some utitlity functions instead??
-    pub fn rng_mut(&mut self) -> &mut MainRng {
-        &mut self.rng
-    }
-
-    pub fn our_connection_info(&mut self) -> Result<SocketAddr> {
+    pub fn our_connection_info(&self) -> Result<SocketAddr> {
         self.quic_p2p.our_endpoint().map_err(|err| {
             debug!("Failed to retrieve our connection info: {:?}", err);
             err.into()
@@ -129,15 +88,16 @@ impl Core {
     ) -> Result<()> {
         // TODO: can we keep the Connections to nodes to make this more efficient??
         let conn = self.quic_p2p.connect_to(recipient).await?;
-        conn.send_only(msg).await.map_err(RoutingError::Network)
+        conn.send_uni(msg).await.map_err(RoutingError::Network)
     }
 
     pub async fn send_direct_message(
         &mut self,
+        src_id: &FullId,
         recipient: &SocketAddr,
         variant: Variant,
     ) -> Result<()> {
-        let message = Message::single_src(&self.full_id, DstLocation::Direct, variant, None, None)?;
+        let message = Message::single_src(src_id, DstLocation::Direct, variant, None, None)?;
         self.send_message_to_target(recipient, message.to_bytes())
             .await
     }
@@ -149,13 +109,14 @@ impl Core {
     }
 
     // Private helper to send a message using the given quic-p2p Connection
-    async fn send_direct_message_on_conn(
+    pub async fn send_direct_message_on_conn(
         &mut self,
+        src_id: &FullId,
         conn: &mut Connection,
         variant: Variant,
     ) -> Result<()> {
-        let message = Message::single_src(&self.full_id, DstLocation::Direct, variant, None, None)?;
-        conn.send_only(message.to_bytes())
+        let message = Message::single_src(src_id, DstLocation::Direct, variant, None, None)?;
+        conn.send_uni(message.to_bytes())
             .await
             .map_err(RoutingError::Network)
     }

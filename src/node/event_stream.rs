@@ -10,10 +10,12 @@ use crate::{
     event::Event,
     location::{DstLocation, SrcLocation},
     messages::{Message, Variant},
+    node::stage::Stage,
 };
 use bytes::Bytes;
+use futures::lock::Mutex;
 use quic_p2p::{IncomingConnections, IncomingMessages, Message as QuicP2pMsg};
-use std::net::SocketAddr;
+use std::{net::SocketAddr, sync::Arc};
 use tokio::sync::mpsc;
 use xor_name::XorName;
 
@@ -24,25 +26,48 @@ const MAX_EVENTS_BUFFERED: usize = 1024;
 
 /// Stream of routing node events
 pub struct EventStream {
-    events_rx: mpsc::Receiver<Event>,
+    events_rx: mpsc::Receiver<(Option<Event>, Option<(SocketAddr, Message)>)>,
+    stage: Arc<Mutex<Stage>>,
 }
 
 impl EventStream {
-    pub(crate) fn new(incoming_conns: IncomingConnections, xorname: XorName) -> Self {
-        let (events_tx, events_rx) = mpsc::channel::<Event>(MAX_EVENTS_BUFFERED);
+    pub(crate) fn new(
+        stage: Arc<Mutex<Stage>>,
+        incoming_conns: IncomingConnections,
+        xorname: XorName,
+    ) -> Self {
+        // TODO: remove the bool and define a type which signals if the
+        // event needs to be processed by us or simply relay it
+        let (events_tx, events_rx) =
+            mpsc::channel::<(Option<Event>, Option<(SocketAddr, Message)>)>(MAX_EVENTS_BUFFERED);
         Self::spawn_connections_handler(events_tx, incoming_conns, xorname);
 
-        Self { events_rx }
+        Self { events_rx, stage }
     }
 
     /// Returns next event
     pub async fn next(&mut self) -> Option<Event> {
-        self.events_rx.recv().await
+        while let Some((relay_event, msg)) = self.events_rx.recv().await {
+            // Shall we just relay the event?
+            if relay_event.is_some() {
+                info!("Relaying the event: {:?}", relay_event);
+                return relay_event;
+            } else if let Some((src, message)) = msg {
+                // Process the message according to our stage
+                let _ = self
+                    .stage
+                    .lock()
+                    .await
+                    .process_message(Some(src), message)
+                    .await;
+            }
+        }
+        None
     }
 
     // Spawns a task which handles each new incoming connection from peers
     fn spawn_connections_handler(
-        events_tx: mpsc::Sender<Event>,
+        events_tx: mpsc::Sender<(Option<Event>, Option<(SocketAddr, Message)>)>,
         mut incoming_conns: IncomingConnections,
         xorname: XorName,
     ) {
@@ -59,7 +84,7 @@ impl EventStream {
 
     // Spawns a task which handles each new incoming message from a connection with a peer
     fn spawn_messages_handler(
-        mut events_tx: mpsc::Sender<Event>,
+        mut events_tx: mpsc::Sender<(Option<Event>, Option<(SocketAddr, Message)>)>,
         mut incoming_msgs: IncomingMessages,
         xorname: XorName,
     ) {
@@ -87,11 +112,12 @@ impl EventStream {
                         // Since it's arriving on a bi-stream we treat it as a Client
                         // message which we report directly to the event stream consumer
                         // without doing any intermediate processing.
-                        Some(Event::MessageReceived {
+                        let event_to_relay = Some(Event::MessageReceived {
                             content: bytes,
                             src: SrcLocation::Client(src),
                             dst: DstLocation::Node(xorname),
-                        })
+                        });
+                        Some((event_to_relay, None))
                     }
                 };
 
@@ -108,7 +134,10 @@ impl EventStream {
     }
 }
 
-async fn handle_node_message(msg_bytes: Bytes, src: SocketAddr) -> Option<Event> {
+async fn handle_node_message(
+    msg_bytes: Bytes,
+    sender: SocketAddr,
+) -> Option<(Option<Event>, Option<(SocketAddr, Message)>)> {
     match Message::from_bytes(&msg_bytes) {
         Err(error) => {
             debug!("Failed to deserialize message: {:?}", error);
@@ -116,18 +145,17 @@ async fn handle_node_message(msg_bytes: Bytes, src: SocketAddr) -> Option<Event>
         }
         Ok(msg) => {
             trace!("try handle message {:?}", msg);
-
-            match msg.variant() {
-                Variant::UserMessage(bytes) => Some(Event::MessageReceived {
+            let event_to_relay = if let Variant::UserMessage(bytes) = msg.variant() {
+                Some(Event::MessageReceived {
                     content: bytes.clone(),
                     src: msg.src().src_location(),
                     dst: *msg.dst(),
-                }),
-                other => {
-                    debug!("IGNORING MESSAGE FOR NOW! {:?}", other);
-                    None
-                }
-            }
+                })
+            } else {
+                None
+            };
+
+            Some((event_to_relay, Some((sender, msg))))
 
             /*if !node.in_dst_location(msg.dst()) || msg.dst().is_section() {
                 // Relay closer to the destination or broadcast to the rest of our section.

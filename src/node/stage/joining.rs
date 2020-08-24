@@ -7,10 +7,10 @@
 // permissions and limitations relating to use of the SAFE Network Software.
 
 use crate::{
-    core::Core,
+    comm::Comm,
     error::Result,
     event::Connected,
-    id::P2pNode,
+    id::{FullId, P2pNode},
     messages::{
         self, BootstrapResponse, JoinRequest, Message, MessageStatus, Variant, VerifyStatus,
     },
@@ -18,7 +18,8 @@ use crate::{
     section::EldersInfo,
 };
 
-use std::time::Duration;
+use bytes::Bytes;
+use std::{net::SocketAddr, time::Duration};
 use xor_name::Prefix;
 
 /// Time after which an attempt to joining a section is cancelled (and possibly retried).
@@ -32,36 +33,41 @@ pub(crate) struct Joining {
     section_key: bls::PublicKey,
     // Whether we are joining as infant or relocating.
     join_type: JoinType,
+    full_id: FullId,
+    comm: Comm,
 }
 
 impl Joining {
     pub async fn new(
-        core: &mut Core,
+        comm: Comm,
         elders_info: EldersInfo,
         section_key: bls::PublicKey,
         relocate_payload: Option<RelocatePayload>,
+        full_id: FullId,
     ) -> Result<Self> {
         let join_type = match relocate_payload {
             Some(payload) => JoinType::Relocate(payload),
             None => JoinType::First,
         };
 
-        let stage = Self {
+        let mut stage = Self {
             elders_info,
             section_key,
             join_type,
+            full_id,
+            comm,
         };
-        stage.send_join_requests(core).await?;
+        stage.send_join_requests().await?;
 
         Ok(stage)
     }
 
-    /*pub async fn handle_timeout(&mut self, core: &mut Core, token: u64) -> Result<()> {
+    /*pub async fn handle_timeout(&mut self, comm: &mut Comm, token: u64) -> Result<()> {
         if token == self.timer_token {
             debug!("Timeout when trying to join a section");
             // Try again
-            self.send_join_requests(core).await?;
-            self.timer_token = core.timer.schedule(JOIN_TIMEOUT);
+            self.send_join_requests().await?;
+            self.timer_token = comm.timer.schedule(JOIN_TIMEOUT);
         }
         Ok(())
     }*/
@@ -109,9 +115,29 @@ impl Joining {
         }
     }
 
+    pub fn comm(&self) -> &Comm {
+        &self.comm
+    }
+
+    pub async fn send_message_to_target(
+        &mut self,
+        recipient: &SocketAddr,
+        msg: Bytes,
+    ) -> Result<()> {
+        self.comm.send_message_to_target(recipient, msg).await
+    }
+
+    pub async fn process_message(
+        &mut self,
+        sender: Option<SocketAddr>,
+        msg: Message,
+    ) -> Result<()> {
+        Ok(())
+    }
+
     pub async fn handle_bootstrap_response(
         &mut self,
-        core: &mut Core,
+        comm: &mut Comm,
         sender: P2pNode,
         new_elders_info: EldersInfo,
         new_section_key: bls::PublicKey,
@@ -120,14 +146,17 @@ impl Joining {
             return Ok(());
         }
 
-        if new_elders_info.prefix.matches(core.name()) {
+        if new_elders_info
+            .prefix
+            .matches(self.full_id.public_id().name())
+        {
             info!(
                 "Newer Join response for our prefix {:?} from {:?}",
                 new_elders_info, sender
             );
             self.elders_info = new_elders_info;
             self.section_key = new_section_key;
-            self.send_join_requests(core).await?;
+            self.send_join_requests().await?;
         } else {
             log_or_panic!(
                 log::Level::Error,
@@ -153,7 +182,7 @@ impl Joining {
         }
     }
 
-    async fn send_join_requests(&self, core: &mut Core) -> Result<()> {
+    async fn send_join_requests(&mut self) -> Result<()> {
         let relocate_payload = match &self.join_type {
             JoinType::First { .. } => None,
             JoinType::Relocate(payload) => Some(payload),
@@ -167,7 +196,9 @@ impl Joining {
 
             info!("Sending {:?} to {}", join_request, dst);
             let variant = Variant::JoinRequest(Box::new(join_request));
-            core.send_direct_message(dst.peer_addr(), variant).await?;
+            self.comm
+                .send_direct_message(&self.full_id, dst.peer_addr(), variant)
+                .await?;
         }
 
         Ok(())

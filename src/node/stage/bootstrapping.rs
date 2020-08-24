@@ -7,15 +7,17 @@
 // permissions and limitations relating to use of the SAFE Network Software.
 
 use crate::{
-    core::Core,
+    comm::Comm,
     error::Result,
     id::{FullId, P2pNode},
     messages::{BootstrapResponse, Message, MessageStatus, Variant, VerifyStatus},
     relocation::{RelocatePayload, SignedRelocateDetails},
+    rng::MainRng,
     section::EldersInfo,
     time::Duration,
 };
 
+use bytes::Bytes;
 use fxhash::FxHashSet;
 use std::{iter, net::SocketAddr};
 use xor_name::Prefix;
@@ -28,14 +30,35 @@ pub(crate) struct Bootstrapping {
     // Using `FxHashSet` for deterministic iteration order.
     pending_requests: FxHashSet<SocketAddr>,
     relocate_details: Option<SignedRelocateDetails>,
+    full_id: FullId,
+    rng: MainRng,
+    comm: Comm,
 }
 
 impl Bootstrapping {
-    pub fn new(relocate_details: Option<SignedRelocateDetails>) -> Self {
-        Self {
+    pub async fn new(
+        relocate_details: Option<SignedRelocateDetails>,
+        full_id: FullId,
+        rng: MainRng,
+        mut comm: Comm,
+    ) -> Result<Self> {
+        let mut conn = comm.bootstrap().await?;
+
+        debug!("Sending BootstrapRequest to {}.", conn.remote_address());
+        comm.send_direct_message_on_conn(
+            &full_id,
+            &mut conn,
+            Variant::BootstrapRequest(*full_id.public_id().name()),
+        )
+        .await?;
+
+        Ok(Self {
             pending_requests: Default::default(),
             relocate_details,
-        }
+            full_id,
+            rng,
+            comm,
+        })
     }
 
     pub fn decide_message_status(&self, msg: &Message) -> Result<MessageStatus> {
@@ -67,9 +90,29 @@ impl Bootstrapping {
         }
     }
 
+    pub fn comm(&self) -> &Comm {
+        &self.comm
+    }
+
+    pub async fn send_message_to_target(
+        &mut self,
+        recipient: &SocketAddr,
+        msg: Bytes,
+    ) -> Result<()> {
+        self.comm.send_message_to_target(recipient, msg).await
+    }
+
+    pub async fn process_message(
+        &mut self,
+        sender: Option<SocketAddr>,
+        msg: Message,
+    ) -> Result<()> {
+        debug!("GGGGGGGGGGGGGGGGGGGGGGGGGGG");
+        Ok(())
+    }
+
     pub async fn handle_bootstrap_response(
         &mut self,
-        core: &mut Core,
         sender: P2pNode,
         response: BootstrapResponse,
     ) -> Result<Option<JoinParams>> {
@@ -93,7 +136,7 @@ impl Bootstrapping {
                     elders_info, sender
                 );
 
-                let relocate_payload = self.join_section(core, &elders_info)?;
+                let relocate_payload = self.join_section(&elders_info)?;
                 Ok(Some(JoinParams {
                     elders_info,
                     section_key,
@@ -105,54 +148,47 @@ impl Bootstrapping {
                     "Bootstrapping redirected to another set of peers: {:?}",
                     new_conn_infos
                 );
-                self.reconnect_to_new_section(core, new_conn_infos).await?;
+                self.reconnect_to_new_section(new_conn_infos).await?;
                 Ok(None)
             }
         }
     }
 
-    pub async fn send_bootstrap_request(&mut self, core: &mut Core, dst: SocketAddr) -> Result<()> {
+    pub async fn send_bootstrap_request(&mut self, dst: SocketAddr) -> Result<()> {
         //let token = core.timer.schedule(BOOTSTRAP_TIMEOUT);
         //let _ = self.timeout_tokens.insert(token, dst);
 
         let xorname = match &self.relocate_details {
             Some(details) => *details.destination(),
-            None => *core.name(),
+            None => *self.full_id.public_id().name(),
         };
 
         debug!("Sending BootstrapRequest to {}.", dst);
-        core.send_direct_message(&dst, Variant::BootstrapRequest(xorname))
+        self.comm
+            .send_direct_message(&self.full_id, &dst, Variant::BootstrapRequest(xorname))
             .await
     }
 
-    async fn reconnect_to_new_section(
-        &mut self,
-        core: &mut Core,
-        new_conn_infos: Vec<SocketAddr>,
-    ) -> Result<()> {
+    async fn reconnect_to_new_section(&mut self, new_conn_infos: Vec<SocketAddr>) -> Result<()> {
         // TODO???
         /*for addr in self.pending_requests.drain() {
             core.transport.disconnect(addr);
         }*/
 
         for conn_info in new_conn_infos {
-            self.send_bootstrap_request(core, conn_info).await?;
+            self.send_bootstrap_request(conn_info).await?;
         }
 
         Ok(())
     }
 
-    fn join_section(
-        &mut self,
-        core: &mut Core,
-        elders_info: &EldersInfo,
-    ) -> Result<Option<RelocatePayload>> {
+    fn join_section(&mut self, elders_info: &EldersInfo) -> Result<Option<RelocatePayload>> {
         let relocate_details = self.relocate_details.take();
         let destination = match &relocate_details {
             Some(details) => *details.destination(),
-            None => *core.name(),
+            None => *self.full_id.public_id().name(),
         };
-        let old_full_id = core.full_id().clone();
+        let old_full_id = self.full_id.clone();
 
         // Use a name that will match the destination even after multiple splits
         let extra_split_count = 3;
@@ -161,14 +197,14 @@ impl Bootstrapping {
             destination,
         );
 
-        if !name_prefix.matches(core.name()) {
-            let new_full_id = FullId::within_range(core.rng_mut(), &name_prefix.range_inclusive());
+        if !name_prefix.matches(self.full_id.public_id().name()) {
+            let new_full_id = FullId::within_range(&mut self.rng, &name_prefix.range_inclusive());
             info!("Changing name to {}.", new_full_id.public_id().name());
-            core.set_full_id(new_full_id);
+            self.full_id = new_full_id;
         }
 
         if let Some(details) = relocate_details {
-            let payload = RelocatePayload::new(details, core.id(), &old_full_id)?;
+            let payload = RelocatePayload::new(details, self.full_id.public_id(), &old_full_id)?;
             Ok(Some(payload))
         } else {
             Ok(None)
