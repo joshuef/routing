@@ -100,10 +100,10 @@ impl Node {
         let network_params = config.network_params;
         let transport_config = config.transport_config;
 
-        let comm = Comm::new(transport_config)?;
         let node_name = full_id.public_id().name().clone();
 
         let stage = if as_first_node {
+            let comm = Comm::new(transport_config).await?;
             match Approved::first(comm, full_id.clone(), network_params, rng).await {
                 Ok(stage) => {
                     info!("{} Started a new network as a seed node.", node_name);
@@ -116,7 +116,20 @@ impl Node {
             }
         } else {
             info!("{} Bootstrapping a new node.", node_name);
-            Stage::Bootstrapping(Bootstrapping::new(None, full_id.clone(), rng, comm).await?)
+            let (mut comm, mut connection) = Comm::from_bootstrapping(transport_config).await?;
+
+            debug!(
+                "Sending BootstrapRequest to {}",
+                connection.remote_address()
+            );
+            comm.send_direct_message_on_conn(
+                &full_id,
+                &mut connection,
+                Variant::BootstrapRequest(*full_id.public_id().name()),
+            )
+            .await?;
+
+            Stage::Bootstrapping(Bootstrapping::new(None, full_id.clone(), rng, comm))
         };
 
         Ok(Self {
@@ -125,7 +138,6 @@ impl Node {
         })
     }
 
-    /// Starts listening for events returning a stream where to read them from.
     pub async fn listen_events(&self) -> Result<EventStream> {
         let incoming_conns = futures::executor::block_on(self.stage.lock()).listen_events()?;
         Ok(EventStream::new(
@@ -173,10 +185,8 @@ impl Node {
     }
 
     /// Returns whether the node is Elder.
-    pub async fn is_elder(&self) -> bool {
-        self.stage
-            .lock()
-            .await
+    pub fn is_elder(&self) -> bool {
+        futures::executor::block_on(self.stage.lock())
             .approved()
             .map(|stage| {
                 stage

@@ -54,12 +54,7 @@ impl EventStream {
                 return relay_event;
             } else if let Some((src, message)) = msg {
                 // Process the message according to our stage
-                let _ = self
-                    .stage
-                    .lock()
-                    .await
-                    .process_message(Some(src), message)
-                    .await;
+                let _ = self.stage.lock().await.process_message(src, message).await;
             }
         }
         None
@@ -199,16 +194,7 @@ async fn handle_node_message(
         }
     }
 }
-
-/*fn decide_message_status(&self, msg: &Message) -> Result<MessageStatus> {
-    match &self.stage {
-        Stage::Bootstrapping(stage) => stage.decide_message_status(msg),
-        Stage::Joining(stage) => stage.decide_message_status(msg),
-        Stage::Approved(stage) => stage.decide_message_status(self.core.id(), msg),
-        Stage::Terminated => Ok(MessageStatus::Useless),
-    }
-}
-
+/*
 async fn handle_message(&mut self, sender: SocketAddr, msg: Message) -> Result<()> {
     if let Stage::Approved(stage) = &mut self.stage {
         stage.update_section_knowledge(&mut self.core, &msg).await?;

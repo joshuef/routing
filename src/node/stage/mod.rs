@@ -76,18 +76,16 @@ impl Stage {
         msg: Bytes,
     ) -> Result<()> {
         match self {
-            Self::Bootstrapping(stage) => stage.send_message_to_target(recipient, msg).await,
-            Self::Joining(stage) => stage.send_message_to_target(recipient, msg).await,
-            Self::Approved(stage) => stage.send_message_to_target(recipient, msg).await,
+            Self::Bootstrapping(ref mut stage) => {
+                stage.send_message_to_target(recipient, msg).await
+            }
+            Self::Joining(ref mut stage) => stage.send_message_to_target(recipient, msg).await,
+            Self::Approved(ref mut stage) => stage.send_message_to_target(recipient, msg).await,
             Self::Terminated => Err(RoutingError::InvalidState),
         }
     }
 
-    pub async fn process_message(
-        &mut self,
-        sender: Option<SocketAddr>,
-        msg: Message,
-    ) -> Result<()> {
+    pub async fn process_message(&mut self, sender: SocketAddr, msg: Message) -> Result<()> {
         match self {
             Self::Bootstrapping(stage) => stage.process_message(sender, msg).await,
             Self::Joining(stage) => stage.process_message(sender, msg).await,
