@@ -16,11 +16,14 @@ use crate::{
     section::EldersInfo,
     time::Duration,
 };
+use quic_p2p::{IncomingConnections, IncomingMessages, Message as QuicP2pMsg};
 
 use bytes::Bytes;
 use fxhash::FxHashSet;
 use std::{iter, net::SocketAddr};
 use xor_name::Prefix;
+
+use log::warn;
 
 /// Time after which bootstrap is cancelled (and possibly retried).
 pub const BOOTSTRAP_TIMEOUT: Duration = Duration::from_secs(20);
@@ -36,19 +39,80 @@ pub(crate) struct Bootstrapping {
 }
 
 impl Bootstrapping {
-    pub fn new(
+    pub async fn bootstrap(
         relocate_details: Option<SignedRelocateDetails>,
         full_id: FullId,
         rng: MainRng,
-        comm: Comm,
-    ) -> Self {
-        Self {
+        mut comm: Comm,
+    ) -> Result<()> {
+
+        // Why do we need this in stages?
+
+        let mut bootstrap = Self {
             pending_requests: Default::default(),
             relocate_details,
             full_id,
             rng,
             comm,
+        };
+
+        let mut incoming = bootstrap.comm.listen_events()?;
+
+        while let Some( mut incoming_msgs) = incoming.next().await {
+            trace!(
+                "New connection established by peer {}",
+                incoming_msgs.remote_addr()
+            );
+
+            while let Some(msg) = incoming_msgs.next().await {
+                match msg {
+                    QuicP2pMsg::UniStream { bytes, src } => {
+                        trace!(
+                            "New message ({} bytes) received on a uni-stream from: {}",
+                            bytes.len(),
+                            src
+                        );
+                        // Since it's arriving on a uni-stream we treat it as a Node
+                        // message which we need to be processed by us, as well as
+                        // reported to the event stream consumer.
+                        // handle_node_message(bytes, src).await
+
+
+
+                        match Message::from_bytes(&bytes) {
+                            Err(error) => {
+                                debug!("Failed to deserialize message: {:?}", error);
+                                // None
+                            }
+                            Ok(msg) => {
+                                trace!("try handle message in bootstrap process{:?}", msg);
+                                let _ = bootstrap.process_message(src, msg);
+                                let _ = bootstrap.handle_bootstrap_response(src, msg);
+                                // let event_to_relay = if let Variant::BootstrapResponse(res) = msg.variant() {
+                                //     // Some(Event::MessageReceived {
+                                //     //     content: bytes.clone(),
+                                //     //     src: msg.src().src_location(),
+                                //     //     dst: *msg.dst(),
+                                //     // })
+                                // } else {
+                                //     // None
+                                //     // Do nothing
+                                // };
+                    
+                                // Some((event_to_relay, Some((sender, msg))))
+                            }
+                        }
+                    },
+                    _ => {
+                        // warn!("Non node-msg received during routing bootstrap")
+                    }
+                }
+            }
+            // Self::spawn_messages_handler(events_tx.clone(), incoming_msgs, xorname)
         }
+
+
+        Ok(())
     }
 
     pub async fn process_message(&mut self, sender: SocketAddr, msg: Message) -> Result<()> {

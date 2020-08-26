@@ -80,7 +80,7 @@ impl Default for NodeConfig {
 /// `Node` or as a part of a section or group location. Their `src` argument indicates that
 /// role, and can be any [`SrcLocation`](enum.SrcLocation.html).
 pub struct Node {
-    stage: Arc<Mutex<Stage>>,
+    // stage: Arc<Mutex<Stage>>,
     full_id: FullId,
 }
 
@@ -102,19 +102,22 @@ impl Node {
 
         let node_name = full_id.public_id().name().clone();
 
-        let stage = if as_first_node {
+        // let stage = 
+        if as_first_node {
             let comm = Comm::new(transport_config).await?;
             match Approved::first(comm, full_id.clone(), network_params, rng).await {
                 Ok(stage) => {
                     info!("{} Started a new network as a seed node.", node_name);
-                    Stage::Approved(stage)
+                    // Stage::Approved(stage)
                 }
                 Err(error) => {
                     error!("{} Failed to start the first node: {:?}", node_name, error);
-                    Stage::Terminated
+                    // Stage::Terminated
                 }
             }
-        } else {
+        }
+        
+        else {
             info!("{} Bootstrapping a new node.", node_name);
             let (mut comm, mut connection) = Comm::from_bootstrapping(transport_config).await?;
 
@@ -129,11 +132,11 @@ impl Node {
             )
             .await?;
 
-            Stage::Bootstrapping(Bootstrapping::new(None, full_id.clone(), rng, comm))
-        };
+            Bootstrapping::new(None, full_id.clone(), rng, comm).await;
+        }
 
         Ok(Self {
-            stage: Arc::new(Mutex::new(stage)),
+            // stage: Arc::new(Mutex::new(stage)),
             full_id,
         })
     }
