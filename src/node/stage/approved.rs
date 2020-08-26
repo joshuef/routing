@@ -155,8 +155,8 @@ impl Approved {
         &self.full_id
     }
 
-    pub fn comm(&self) -> &Comm {
-        &self.comm
+    pub fn comm(&mut self) -> &mut Comm {
+        &mut self.comm
     }
 
     pub async fn send_message_to_target(
@@ -389,15 +389,11 @@ impl Approved {
     // Message handling
     ////////////////////////////////////////////////////////////////////////////
 
-    pub async fn process_message(
-        &mut self,
-        sender: Option<SocketAddr>,
-        msg: Message,
-    ) -> Result<()> {
+    pub async fn process_message(&mut self, sender: SocketAddr, msg: Message) -> Result<()> {
         trace!("Got {:?}", msg);
         match msg.variant() {
             Variant::BootstrapRequest(name) => {
-                self.handle_bootstrap_request(msg.src().to_sender_node(sender)?, *name)
+                self.handle_bootstrap_request(msg.src().to_sender_node(Some(sender))?, *name)
                     .await
             }
             other => {

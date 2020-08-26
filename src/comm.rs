@@ -15,38 +15,47 @@ use crate::{
 };
 use bytes::Bytes;
 use hex_fmt::HexFmt;
-use quic_p2p::{Config, Connection, IncomingConnections, QuicP2p};
+use quic_p2p::{Config, Connection, Endpoint, IncomingConnections, QuicP2p};
 use std::net::SocketAddr;
 
 // Communication component of the node to interact with other nodes.
 pub(crate) struct Comm {
     quic_p2p: QuicP2p,
+    endpoint: Endpoint,
 }
 
 impl Comm {
-    pub fn new(transport_config: Config) -> Result<Self> {
+    pub async fn new(transport_config: Config) -> Result<Self> {
         let quic_p2p = QuicP2p::with_config(Some(transport_config), Default::default(), true)?;
 
-        Ok(Self { quic_p2p })
+        // Don't bootstrap, just create an endpoint where to listen to
+        // the incoming messages from other nodes.
+        let endpoint = quic_p2p.new_endpoint()?;
+
+        Ok(Self { quic_p2p, endpoint })
     }
 
-    /// Bootstrap to the network returning the connection to a node
-    pub async fn bootstrap(&mut self) -> Result<Connection> {
-        self.quic_p2p
+    pub async fn from_bootstrapping(transport_config: Config) -> Result<(Self, Connection)> {
+        let mut quic_p2p = QuicP2p::with_config(Some(transport_config), Default::default(), true)?;
+
+        // Bootstrap to the network returning the connection to a node.
+        let (endpoint, connection) = quic_p2p
             .bootstrap()
             .await
-            .map_err(|err| RoutingError::ToBeDefined(format!("{}", err)))
+            .map_err(|err| RoutingError::ToBeDefined(format!("{}", err)))?;
+
+        Ok((Self { quic_p2p, endpoint }, connection))
     }
 
     /// Starts listening for events returning a stream where to read them from.
-    pub fn listen_events(&self) -> Result<IncomingConnections> {
-        self.quic_p2p.listen().map_err(|err| {
+    pub fn listen_events(&mut self) -> Result<IncomingConnections> {
+        self.endpoint.listen().map_err(|err| {
             RoutingError::ToBeDefined(format!("Failed to start listening for messages: {}", err))
         })
     }
 
     pub fn our_connection_info(&self) -> Result<SocketAddr> {
-        self.quic_p2p.our_endpoint().map_err(|err| {
+        self.endpoint.our_endpoint().map_err(|err| {
             debug!("Failed to retrieve our connection info: {:?}", err);
             err.into()
         })
@@ -87,7 +96,7 @@ impl Comm {
         msg: Bytes,
     ) -> Result<()> {
         // TODO: can we keep the Connections to nodes to make this more efficient??
-        let conn = self.quic_p2p.connect_to(recipient).await?;
+        let conn = self.endpoint.connect_to(recipient).await?;
         conn.send_uni(msg).await.map_err(RoutingError::Network)
     }
 

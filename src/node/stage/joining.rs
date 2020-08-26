@@ -115,8 +115,8 @@ impl Joining {
         }
     }
 
-    pub fn comm(&self) -> &Comm {
-        &self.comm
+    pub fn comm(&mut self) -> &mut Comm {
+        &mut self.comm
     }
 
     pub async fn send_message_to_target(
@@ -127,11 +127,7 @@ impl Joining {
         self.comm.send_message_to_target(recipient, msg).await
     }
 
-    pub async fn process_message(
-        &mut self,
-        sender: Option<SocketAddr>,
-        msg: Message,
-    ) -> Result<()> {
+    pub async fn process_message(&mut self, sender: SocketAddr, msg: Message) -> Result<()> {
         Ok(())
     }
 

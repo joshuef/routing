@@ -10,7 +10,7 @@ use crate::{
     comm::Comm,
     error::Result,
     id::{FullId, P2pNode},
-    messages::{BootstrapResponse, Message, MessageStatus, Variant, VerifyStatus},
+    messages::{BootstrapResponse, Message, Variant, VerifyStatus},
     relocation::{RelocatePayload, SignedRelocateDetails},
     rng::MainRng,
     section::EldersInfo,
@@ -36,43 +36,37 @@ pub(crate) struct Bootstrapping {
 }
 
 impl Bootstrapping {
-    pub async fn new(
+    pub fn new(
         relocate_details: Option<SignedRelocateDetails>,
         full_id: FullId,
         rng: MainRng,
-        mut comm: Comm,
-    ) -> Result<Self> {
-        let mut conn = comm.bootstrap().await?;
-
-        debug!("Sending BootstrapRequest to {}.", conn.remote_address());
-        comm.send_direct_message_on_conn(
-            &full_id,
-            &mut conn,
-            Variant::BootstrapRequest(*full_id.public_id().name()),
-        )
-        .await?;
-
-        Ok(Self {
+        comm: Comm,
+    ) -> Self {
+        Self {
             pending_requests: Default::default(),
             relocate_details,
             full_id,
             rng,
             comm,
-        })
+        }
     }
 
-    pub fn decide_message_status(&self, msg: &Message) -> Result<MessageStatus> {
+    pub async fn process_message(&mut self, sender: SocketAddr, msg: Message) -> Result<()> {
         match msg.variant() {
             Variant::BootstrapResponse(_) => {
-                verify_message(msg)?;
-                Ok(MessageStatus::Useful)
+                verify_message(&msg)?;
+                Ok(())
             }
 
             Variant::NeighbourInfo { .. }
             | Variant::UserMessage(_)
             | Variant::BouncedUntrustedMessage(_)
             | Variant::DKGMessage { .. }
-            | Variant::DKGOldElders { .. } => Ok(MessageStatus::Unknown),
+            | Variant::DKGOldElders { .. } => {
+                debug!("Unknown message from {}: {:?} ", sender, msg);
+                // self.msg_backlog.push(msg.into_queued(Some(sender)))
+                Ok(())
+            }
 
             Variant::NodeApproval(_)
             | Variant::EldersUpdate { .. }
@@ -86,12 +80,15 @@ impl Bootstrapping {
             | Variant::ParsecResponse(..)
             | Variant::Ping
             | Variant::BouncedUnknownMessage { .. }
-            | Variant::Vote { .. } => Ok(MessageStatus::Useless),
+            | Variant::Vote { .. } => {
+                debug!("Useless message from {}: {:?}", sender, msg);
+                Ok(())
+            }
         }
     }
 
-    pub fn comm(&self) -> &Comm {
-        &self.comm
+    pub fn comm(&mut self) -> &mut Comm {
+        &mut self.comm
     }
 
     pub async fn send_message_to_target(
@@ -100,15 +97,6 @@ impl Bootstrapping {
         msg: Bytes,
     ) -> Result<()> {
         self.comm.send_message_to_target(recipient, msg).await
-    }
-
-    pub async fn process_message(
-        &mut self,
-        sender: Option<SocketAddr>,
-        msg: Message,
-    ) -> Result<()> {
-        debug!("GGGGGGGGGGGGGGGGGGGGGGGGGGG");
-        Ok(())
     }
 
     pub async fn handle_bootstrap_response(
