@@ -16,7 +16,7 @@ use crate::{
     section::EldersInfo,
     time::Duration,
 };
-use quic_p2p::{IncomingConnections, IncomingMessages, Message as QuicP2pMsg};
+use quic_p2p::{IncomingConnections, IncomingMessages, Connection, Message as QuicP2pMsg};
 
 use bytes::Bytes;
 use fxhash::FxHashSet;
@@ -39,12 +39,13 @@ pub(crate) struct Bootstrapping {
 }
 
 impl Bootstrapping {
-    pub async fn bootstrap(
+    pub async fn new(
         relocate_details: Option<SignedRelocateDetails>,
         full_id: FullId,
         rng: MainRng,
         mut comm: Comm,
-    ) -> Result<()> {
+        mut connection: Connection
+    ) -> Result<Self> {
 
         // Why do we need this in stages?
 
@@ -56,11 +57,25 @@ impl Bootstrapping {
             comm,
         };
 
+
+        debug!(
+            "Sending BootstrapRequest to {}",
+            connection.remote_address()
+        );
+        bootstrap.comm.send_direct_message_on_conn(
+            &bootstrap.full_id,
+            &mut connection,
+            Variant::BootstrapRequest(*bootstrap.full_id.public_id().name()),
+        )
+        .await?;
+
+        let _ = bootstrap.pending_requests.insert(connection.remote_address());
+
         let mut incoming = bootstrap.comm.listen_events()?;
 
         while let Some( mut incoming_msgs) = incoming.next().await {
             trace!(
-                "New connection established by peer {}",
+                "Newwwwwwwwwwwwwwwwwww connection established by peer {}",
                 incoming_msgs.remote_addr()
             );
 
@@ -68,7 +83,7 @@ impl Bootstrapping {
                 match msg {
                     QuicP2pMsg::UniStream { bytes, src } => {
                         trace!(
-                            "New message ({} bytes) received on a uni-stream from: {}",
+                            "New mmmmmmessage ({} bytes) received on a uni-stream from: {}",
                             bytes.len(),
                             src
                         );
@@ -85,16 +100,20 @@ impl Bootstrapping {
                                 // None
                             }
                             Ok(msg) => {
-                                trace!("try handle message in bootstrap process{:?}", msg);
-                                let _ = bootstrap.process_message(src, msg);
-                                let _ = bootstrap.handle_bootstrap_response(src, msg);
-                                // let event_to_relay = if let Variant::BootstrapResponse(res) = msg.variant() {
+                                trace!("try handle message in bootttstrap process{:?}", msg);
+                                // let _ = bootstrap.process_message(src, msg);
+                                // let event_to_relay = 
+                                if let Variant::BootstrapResponse(res) = msg.variant() {
+                                    let sender = msg.src().to_sender_node(Some(src)).unwrap();
+                                    trace!("its a Boot response, sender is: {:?}", sender);
+                                    let join_params = bootstrap.handle_bootstrap_response(sender, res.clone()).await.unwrap();
                                 //     // Some(Event::MessageReceived {
                                 //     //     content: bytes.clone(),
                                 //     //     src: msg.src().src_location(),
                                 //     //     dst: *msg.dst(),
                                 //     // })
-                                // } else {
+                                } 
+                                // else {
                                 //     // None
                                 //     // Do nothing
                                 // };
@@ -112,7 +131,7 @@ impl Bootstrapping {
         }
 
 
-        Ok(())
+        Ok(bootstrap)
     }
 
     pub async fn process_message(&mut self, sender: SocketAddr, msg: Message) -> Result<()> {
@@ -168,9 +187,10 @@ impl Bootstrapping {
         sender: P2pNode,
         response: BootstrapResponse,
     ) -> Result<Option<JoinParams>> {
+        trace!("????????????????????");
         // Ignore messages from peers we didn't send `BootstrapRequest` to.
         if !self.pending_requests.contains(sender.peer_addr()) {
-            debug!(
+            trace!(
                 "Ignoring BootstrapResponse from unexpected peer: {}",
                 sender,
             );
@@ -178,6 +198,7 @@ impl Bootstrapping {
             return Ok(None);
         }
 
+        trace!("Handling bootstrap response");
         match response {
             BootstrapResponse::Join {
                 elders_info,
@@ -235,6 +256,8 @@ impl Bootstrapping {
     }
 
     fn join_section(&mut self, elders_info: &EldersInfo) -> Result<Option<RelocatePayload>> {
+
+        debug!("Joining section... {:?}", elders_info);
         let relocate_details = self.relocate_details.take();
         let destination = match &relocate_details {
             Some(details) => *details.destination(),
