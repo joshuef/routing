@@ -12,6 +12,7 @@ use crate::{
     error::Result,
     id::{FullId, P2pNode},
     messages::{BootstrapResponse, Message, Variant, VerifyStatus},
+    network_params::NetworkParams,
     relocation::{RelocatePayload, SignedRelocateDetails},
     rng::MainRng,
     section::EldersInfo,
@@ -32,6 +33,7 @@ pub(crate) struct Bootstrapping {
     full_id: FullId,
     rng: MainRng,
     comm: Comm,
+    network_params: NetworkParams,
 }
 
 impl Bootstrapping {
@@ -40,6 +42,7 @@ impl Bootstrapping {
         full_id: FullId,
         rng: MainRng,
         comm: Comm,
+        network_params: NetworkParams,
     ) -> Self {
         Self {
             pending_requests: Default::default(),
@@ -47,6 +50,7 @@ impl Bootstrapping {
             full_id,
             rng,
             comm,
+            network_params,
         }
     }
 
@@ -78,6 +82,8 @@ impl Bootstrapping {
                             section_key,
                             relocate_payload,
                             self.full_id.clone(),
+                            self.network_params,
+                            self.rng,
                         )
                         .await?;
 

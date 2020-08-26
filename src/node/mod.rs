@@ -19,11 +19,10 @@ pub use event_stream::EventStream;
 use self::stage::Stage;
 use crate::{
     error::{Result, RoutingError},
-    event::Connected,
     id::{FullId, P2pNode, PublicId},
     location::{DstLocation, SrcLocation},
     log_utils,
-    messages::{EldersUpdate, Variant},
+    messages::Variant,
     network_params::NetworkParams,
     rng::{self, MainRng},
     section::{SectionProofChain, SharedState},
@@ -96,10 +95,10 @@ impl Node {
         let full_id = config.full_id.unwrap_or_else(|| FullId::gen(&mut rng));
         let node_name = full_id.public_id().name().clone();
         let transport_config = config.transport_config;
+        let network_params = config.network_params;
         let as_first_node = config.first;
 
         let stage = if as_first_node {
-            let network_params = config.network_params;
             match Stage::first_node(transport_config, full_id.clone(), network_params, rng).await {
                 Ok(stage) => {
                     info!("{} Started a new network as a seed node.", node_name);
@@ -113,7 +112,7 @@ impl Node {
             }
         } else {
             info!("{} Bootstrapping a new node.", node_name);
-            Stage::bootstrap(transport_config, full_id.clone(), rng).await?
+            Stage::bootstrap(transport_config, full_id.clone(), network_params, rng).await?
         };
 
         Ok(Self {
@@ -381,31 +380,6 @@ impl Node {
     ////////////////////////////////////////////////////////////////////////////
     // Transitions
     ////////////////////////////////////////////////////////////////////////////
-
-    // Transition from Joining to Approved
-    async fn approve(
-        &mut self,
-        connect_type: Connected,
-        section_key: bls::PublicKey,
-        elders_update: EldersUpdate,
-    ) -> Result<()> {
-        info!(
-            "This node has been approved to join the network at {:?}!",
-            elders_update.elders_info.value.prefix,
-        );
-
-        /*        let shared_state = SharedState::new(section_key, elders_update.elders_info);
-                let mut core = self.core.lock().await;
-                let stage = Approved::new(&mut core, shared_state, elders_update.parsec_version, None)?;
-                self.stage = Stage::Approved(stage);
-
-                self.core
-                    .lock()
-                    .await
-                    .send_event(Event::Connected(connect_type));
-        */
-        Ok(())
-    }
 
     // Transition from Approved to Bootstrapping on relocation
     /*async fn relocate(&mut self, params: RelocateParams) -> Result<()> {

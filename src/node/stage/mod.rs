@@ -92,6 +92,7 @@ impl Stage {
     pub async fn bootstrap(
         transport_config: TransportConfig,
         full_id: FullId,
+        network_params: NetworkParams,
         rng: MainRng,
     ) -> Result<Self> {
         let (mut comm, mut connection) = Comm::from_bootstrapping(transport_config).await?;
@@ -107,7 +108,7 @@ impl Stage {
         )
         .await?;
 
-        let state = Bootstrapping::new(None, full_id.clone(), rng, comm.clone());
+        let state = Bootstrapping::new(None, full_id.clone(), rng, comm.clone(), network_params);
 
         Ok(Self {
             state: State::Bootstrapping(state),
@@ -170,7 +171,12 @@ impl Stage {
                 }
                 Ok(())
             }
-            State::Joining(stage) => stage.process_message(sender, msg).await,
+            State::Joining(stage) => {
+                if let Some(approved) = stage.process_message(sender, msg).await? {
+                    self.state = State::Approved(approved);
+                }
+                Ok(())
+            }
             State::Approved(stage) => stage.process_message(sender, msg).await,
             State::Terminated => Err(RoutingError::InvalidState),
         }
