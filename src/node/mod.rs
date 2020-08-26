@@ -14,9 +14,10 @@ mod tests;
 #[cfg(feature = "mock_base")]
 pub use self::stage::{BOOTSTRAP_TIMEOUT, JOIN_TIMEOUT};
 
-pub(crate) use self::stage::{Approved, Bootstrapping, JoinParams, Joining, RelocateParams, Stage};
+pub use event_stream::EventStream;
+
+use self::stage::Stage;
 use crate::{
-    comm::Comm,
     error::{Result, RoutingError},
     event::Connected,
     id::{FullId, P2pNode, PublicId},
@@ -28,13 +29,10 @@ use crate::{
     section::{SectionProofChain, SharedState},
     TransportConfig,
 };
-pub use event_stream::EventStream;
-
 use bytes::Bytes;
 use futures::lock::Mutex;
 use itertools::Itertools;
-use std::net::SocketAddr;
-use std::sync::Arc;
+use std::{net::SocketAddr, sync::Arc};
 use xor_name::{Prefix, XorName};
 
 #[cfg(all(test, feature = "mock"))]
@@ -95,41 +93,27 @@ impl Node {
     /// event receiver.
     pub async fn new(config: NodeConfig) -> Result<Self> {
         let mut rng = config.rng;
-        let as_first_node = config.first;
         let full_id = config.full_id.unwrap_or_else(|| FullId::gen(&mut rng));
-        let network_params = config.network_params;
-        let transport_config = config.transport_config;
-
         let node_name = full_id.public_id().name().clone();
+        let transport_config = config.transport_config;
+        let as_first_node = config.first;
 
         let stage = if as_first_node {
-            let comm = Comm::new(transport_config).await?;
-            match Approved::first(comm, full_id.clone(), network_params, rng).await {
+            let network_params = config.network_params;
+            match Stage::first_node(transport_config, full_id.clone(), network_params, rng).await {
                 Ok(stage) => {
                     info!("{} Started a new network as a seed node.", node_name);
-                    Stage::Approved(stage)
+                    stage
                 }
                 Err(error) => {
-                    error!("{} Failed to start the first node: {:?}", node_name, error);
-                    Stage::Terminated
+                    let msg = format!("{} Failed to start the first node: {:?}", node_name, error);
+                    error!("{}", msg);
+                    return Err(RoutingError::ToBeDefined(msg));
                 }
             }
         } else {
             info!("{} Bootstrapping a new node.", node_name);
-            let (mut comm, mut connection) = Comm::from_bootstrapping(transport_config).await?;
-
-            debug!(
-                "Sending BootstrapRequest to {}",
-                connection.remote_address()
-            );
-            comm.send_direct_message_on_conn(
-                &full_id,
-                &mut connection,
-                Variant::BootstrapRequest(*full_id.public_id().name()),
-            )
-            .await?;
-
-            Stage::Bootstrapping(Bootstrapping::new(None, full_id.clone(), rng, comm))
+            Stage::bootstrap(transport_config, full_id.clone(), rng).await?
         };
 
         Ok(Self {
@@ -398,22 +382,6 @@ impl Node {
     // Transitions
     ////////////////////////////////////////////////////////////////////////////
 
-    // Transition from Bootstrapping to Joining
-    async fn join(&mut self, params: JoinParams) -> Result<()> {
-        let JoinParams {
-            elders_info,
-            section_key,
-            relocate_payload,
-        } = params;
-
-        /*let mut core = self.core.lock().await;
-        self.stage = Stage::Joining(
-            Joining::new(&mut core, elders_info, section_key, relocate_payload).await?,
-        );*/
-
-        Ok(())
-    }
-
     // Transition from Joining to Approved
     async fn approve(
         &mut self,
@@ -440,22 +408,22 @@ impl Node {
     }
 
     // Transition from Approved to Bootstrapping on relocation
-    async fn relocate(&mut self, params: RelocateParams) -> Result<()> {
+    /*async fn relocate(&mut self, params: RelocateParams) -> Result<()> {
         let RelocateParams {
             conn_infos,
             details,
         } = params;
 
-        /*let mut stage = Bootstrapping::new(Some(details));
+        let mut stage = Bootstrapping::new(Some(details));
 
         let mut core = self.core.lock().await;
         for conn_info in conn_infos {
             stage.send_bootstrap_request(&mut core, conn_info).await?;
         }
 
-        self.stage = Stage::Bootstrapping(stage);*/
+        self.stage = Stage::Bootstrapping(stage);
         Ok(())
-    }
+    }*/
 
     /*async fn set_log_ident(&self) -> log_utils::Guard {
         use std::fmt::Write;

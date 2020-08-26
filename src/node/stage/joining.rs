@@ -17,8 +17,6 @@ use crate::{
     relocation::RelocatePayload,
     section::EldersInfo,
 };
-
-use bytes::Bytes;
 use std::{net::SocketAddr, time::Duration};
 use xor_name::Prefix;
 
@@ -113,18 +111,6 @@ impl Joining {
             | Variant::NotifyLagging { .. }
             | Variant::Ping => Ok(MessageStatus::Useless),
         }
-    }
-
-    pub fn comm(&mut self) -> &mut Comm {
-        &mut self.comm
-    }
-
-    pub async fn send_message_to_target(
-        &mut self,
-        recipient: &SocketAddr,
-        msg: Bytes,
-    ) -> Result<()> {
-        self.comm.send_message_to_target(recipient, msg).await
     }
 
     pub async fn process_message(&mut self, sender: SocketAddr, msg: Message) -> Result<()> {

@@ -6,6 +6,7 @@
 // KIND, either express or implied. Please review the Licences for the specific language governing
 // permissions and limitations relating to use of the SAFE Network Software.
 
+use super::joining::Joining;
 use crate::{
     comm::Comm,
     error::Result,
@@ -16,8 +17,6 @@ use crate::{
     section::EldersInfo,
     time::Duration,
 };
-
-use bytes::Bytes;
 use fxhash::FxHashSet;
 use std::{iter, net::SocketAddr};
 use xor_name::Prefix;
@@ -51,11 +50,41 @@ impl Bootstrapping {
         }
     }
 
-    pub async fn process_message(&mut self, sender: SocketAddr, msg: Message) -> Result<()> {
+    pub async fn process_message(
+        &mut self,
+        sender: SocketAddr,
+        msg: Message,
+    ) -> Result<Option<Joining>> {
         match msg.variant() {
-            Variant::BootstrapResponse(_) => {
-                verify_message(&msg)?;
-                Ok(())
+            Variant::BootstrapResponse(response) => {
+                msg.verify(iter::empty())
+                    .and_then(VerifyStatus::require_full)?;
+
+                match self
+                    .handle_bootstrap_response(
+                        msg.src().to_sender_node(Some(sender))?,
+                        response.clone(),
+                    )
+                    .await?
+                {
+                    Some(JoinParams {
+                        elders_info,
+                        section_key,
+                        relocate_payload,
+                    }) => {
+                        let joining = Joining::new(
+                            self.comm.clone(),
+                            elders_info,
+                            section_key,
+                            relocate_payload,
+                            self.full_id.clone(),
+                        )
+                        .await?;
+
+                        Ok(Some(joining))
+                    }
+                    None => Ok(None),
+                }
             }
 
             Variant::NeighbourInfo { .. }
@@ -64,8 +93,7 @@ impl Bootstrapping {
             | Variant::DKGMessage { .. }
             | Variant::DKGOldElders { .. } => {
                 debug!("Unknown message from {}: {:?} ", sender, msg);
-                // self.msg_backlog.push(msg.into_queued(Some(sender)))
-                Ok(())
+                Ok(None)
             }
 
             Variant::NodeApproval(_)
@@ -82,21 +110,9 @@ impl Bootstrapping {
             | Variant::BouncedUnknownMessage { .. }
             | Variant::Vote { .. } => {
                 debug!("Useless message from {}: {:?}", sender, msg);
-                Ok(())
+                Ok(None)
             }
         }
-    }
-
-    pub fn comm(&mut self) -> &mut Comm {
-        &mut self.comm
-    }
-
-    pub async fn send_message_to_target(
-        &mut self,
-        recipient: &SocketAddr,
-        msg: Bytes,
-    ) -> Result<()> {
-        self.comm.send_message_to_target(recipient, msg).await
     }
 
     pub async fn handle_bootstrap_response(
@@ -104,15 +120,16 @@ impl Bootstrapping {
         sender: P2pNode,
         response: BootstrapResponse,
     ) -> Result<Option<JoinParams>> {
+        // TODO: do we really need to keep track of which peers we are trying to bootstrap to?
         // Ignore messages from peers we didn't send `BootstrapRequest` to.
-        if !self.pending_requests.contains(sender.peer_addr()) {
+        /*if !self.pending_requests.contains(sender.peer_addr()) {
             debug!(
                 "Ignoring BootstrapResponse from unexpected peer: {}",
                 sender,
             );
             //TODO?? core.transport.disconnect(*sender.peer_addr());
             return Ok(None);
-        }
+        }*/
 
         match response {
             BootstrapResponse::Join {
@@ -143,9 +160,6 @@ impl Bootstrapping {
     }
 
     pub async fn send_bootstrap_request(&mut self, dst: SocketAddr) -> Result<()> {
-        //let token = core.timer.schedule(BOOTSTRAP_TIMEOUT);
-        //let _ = self.timeout_tokens.insert(token, dst);
-
         let xorname = match &self.relocate_details {
             Some(details) => *details.destination(),
             None => *self.full_id.public_id().name(),
@@ -204,9 +218,4 @@ pub(crate) struct JoinParams {
     pub elders_info: EldersInfo,
     pub section_key: bls::PublicKey,
     pub relocate_payload: Option<RelocatePayload>,
-}
-
-fn verify_message(msg: &Message) -> Result<()> {
-    msg.verify(iter::empty())
-        .and_then(VerifyStatus::require_full)
 }

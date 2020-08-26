@@ -9,7 +9,7 @@
 use crate::{
     comm::Comm,
     consensus::{
-        self, threshold_count, AccumulatingEvent, AccumulationError, ConsensusEngine, DkgResult,
+        threshold_count, AccumulatingEvent, AccumulationError, ConsensusEngine, DkgResult,
         DkgVoter, ParsecRequest, ParsecResponse, Proof, ProofShare, Proven, Vote, VoteAccumulator,
     },
     delivery_group,
@@ -25,8 +25,8 @@ use crate::{
     relocation::{RelocateDetails, SignedRelocateDetails},
     rng::MainRng,
     section::{
-        member_info, EldersInfo, MemberState, NeighbourEldersRemoved, SectionKeyShare,
-        SectionKeysProvider, SectionUpdateBarrier, SectionUpdateDetails, SharedState, MIN_AGE,
+        EldersInfo, MemberState, NeighbourEldersRemoved, SectionKeyShare, SectionKeysProvider,
+        SectionUpdateBarrier, SectionUpdateDetails, SharedState, MIN_AGE,
     },
     time::Duration,
 };
@@ -34,8 +34,7 @@ use bls_dkg::key_gen::message::Message as DkgMessage;
 use bytes::Bytes;
 use itertools::Itertools;
 use rand::Rng;
-use serde::Serialize;
-use std::{cmp::Ordering, collections::BTreeSet, iter, net::SocketAddr};
+use std::{cmp::Ordering, collections::BTreeSet, net::SocketAddr};
 use xor_name::{Prefix, XorName};
 
 // Interval to progress DKG timed phase
@@ -66,43 +65,6 @@ pub(crate) struct Approved {
 }
 
 impl Approved {
-    // Create the approved stage for the first node in the network.
-    pub async fn first(
-        comm: Comm,
-        full_id: FullId,
-        network_params: NetworkParams,
-        mut rng: MainRng,
-    ) -> Result<Self> {
-        let connection_info = comm.our_connection_info()?;
-        let p2p_node = P2pNode::new(*full_id.public_id(), connection_info);
-
-        let secret_key_set = consensus::generate_secret_key_set(&mut rng, 1);
-        let public_key_set = secret_key_set.public_keys();
-        let secret_key_share = secret_key_set.secret_key_share(0);
-
-        // Note: `ElderInfo` is normally signed with the previous key, but as we are the first node
-        // of the network there is no previous key. Sign with the current key instead.
-        let elders_info = create_first_elders_info(&public_key_set, &secret_key_share, p2p_node)?;
-        let shared_state =
-            create_first_shared_state(&public_key_set, &secret_key_share, elders_info)?;
-
-        let section_key_share = SectionKeyShare {
-            public_key_set,
-            index: 0,
-            secret_key_share,
-        };
-
-        Self::new(
-            comm,
-            shared_state,
-            0,
-            Some(section_key_share),
-            full_id,
-            network_params,
-            rng,
-        )
-    }
-
     // Create the approved stage for a regular node.
     pub fn new(
         comm: Comm,
@@ -127,6 +89,7 @@ impl Approved {
             .elders
             .contains_key(full_id.public_id().name())
         {
+            // TODO ????
             //Some(comm.timer.schedule(consensus_engine.gossip_period()))
             None
         } else {
@@ -151,22 +114,6 @@ impl Approved {
         })
     }
 
-    pub fn full_id(&self) -> &FullId {
-        &self.full_id
-    }
-
-    pub fn comm(&mut self) -> &mut Comm {
-        &mut self.comm
-    }
-
-    pub async fn send_message_to_target(
-        &mut self,
-        recipient: &SocketAddr,
-        msg: Bytes,
-    ) -> Result<()> {
-        self.comm.send_message_to_target(recipient, msg).await
-    }
-
     // Cast a vote for totally ordered event via parsec.
     pub fn cast_ordered_vote(&mut self, event: AccumulatingEvent) {
         match self
@@ -187,9 +134,7 @@ impl Approved {
     // Cast a vote that doesn't need total order, only section consensus.
     pub async fn cast_unordered_vote(&mut self, vote: Vote) -> Result<()> {
         trace!("Vote for {:?}", vote);
-        Ok(())
-        // TODO: remove recursiveness
-        /*
+
         let key_share = self.section_keys_provider.key_share()?;
         let proof_share = vote.prove(
             key_share.public_key_set.clone(),
@@ -204,7 +149,7 @@ impl Approved {
         };
         let proof_chain = self.shared_state.create_proof_chain_for_our_info(None);
         let message = Message::single_src(
-            self.full_id,
+            &self.full_id,
             DstLocation::Section(*self.full_id.public_id().name()),
             variant,
             Some(proof_chain),
@@ -212,8 +157,9 @@ impl Approved {
         )?;
         self.relay_message(&message).await?;
 
-        self.handle_unordered_vote(vote, proof_share).await
-        */
+        // FIXME: remove recursiveness
+        //self.handle_unordered_vote(vote, proof_share).await
+        Ok(())
     }
 
     // Insert the vote into the vote accumulator and handle it if accumulated.
@@ -391,19 +337,29 @@ impl Approved {
 
     pub async fn process_message(&mut self, sender: SocketAddr, msg: Message) -> Result<()> {
         trace!("Got {:?}", msg);
-        match msg.variant() {
-            Variant::BootstrapRequest(name) => {
-                self.handle_bootstrap_request(msg.src().to_sender_node(Some(sender))?, *name)
-                    .await
+        match self.decide_message_status(&msg)? {
+            MessageStatus::Useful => self.update_section_knowledge(&msg).await?,
+            MessageStatus::Untrusted => {
+                debug!("Untrusted message from {}: {:?} ", sender, msg);
+                return self.handle_untrusted_message(Some(sender), msg).await;
             }
-            other => {
-                info!("NOT IMPLEMENTED YET!!!!!!");
-                Ok(())
+            MessageStatus::Unknown => {
+                debug!("Unknown message from {}: {:?} ", sender, msg);
+                return self
+                    .handle_unknown_message(Some(sender), msg.to_bytes())
+                    .await;
+            }
+            MessageStatus::Useless => {
+                debug!("Useless message from {}: {:?}", sender, msg);
+                return Ok(());
             }
         }
+
+        self.handle_useful_message(Some(sender), msg).await
     }
 
-    pub fn decide_message_status(&self, our_id: &PublicId, msg: &Message) -> Result<MessageStatus> {
+    fn decide_message_status(&self, msg: &Message) -> Result<MessageStatus> {
+        let our_id = self.full_id.public_id();
         match msg.variant() {
             Variant::NeighbourInfo { .. } => {
                 if !self.is_our_elder(our_id) {
@@ -489,6 +445,138 @@ impl Approved {
         } else {
             Ok(MessageStatus::Untrusted)
         }
+    }
+
+    async fn handle_useful_message(
+        &mut self,
+        sender: Option<SocketAddr>,
+        msg: Message,
+    ) -> Result<()> {
+        match msg.variant() {
+            Variant::NeighbourInfo { elders_info, .. } => {
+                msg.dst().check_is_section()?;
+                self.handle_neighbour_info(elders_info.value.clone(), *msg.proof_chain_last_key()?)
+                    .await?;
+            }
+            Variant::EldersUpdate(payload) => {
+                let section_key = *msg.proof_chain_last_key()?;
+                self.handle_elders_update(section_key, payload.clone())?;
+            }
+            Variant::Promote {
+                shared_state,
+                parsec_version,
+            } => {
+                self.handle_promote(shared_state.clone(), *parsec_version)
+                    .await?;
+            }
+            Variant::NotifyLagging {
+                shared_state,
+                parsec_version,
+            } => {
+                self.handle_lagging(shared_state.clone(), *parsec_version)
+                    .await?;
+            }
+            Variant::Relocate(_) => {
+                msg.src().check_is_section()?;
+                let signed_relocate = SignedRelocateDetails::new(msg)?;
+                // FIXME
+                /*if let Some(params) = self.handle_relocate(signed_relocate) {
+                    self.relocate(params)
+                }*/
+                unimplemented!()
+            }
+            Variant::MessageSignature(accumulating_msg) => {
+                let result = self
+                    .handle_message_signature(*accumulating_msg.clone(), *msg.src().as_node()?)
+                    .await;
+                if let Some(addr) = sender {
+                    self.check_lagging(&addr, &accumulating_msg.proof_share)
+                        .await?;
+                }
+                result?
+            }
+            Variant::BootstrapRequest(name) => {
+                self.handle_bootstrap_request(msg.src().to_sender_node(sender)?, *name)
+                    .await?;
+            }
+            Variant::JoinRequest(join_request) => {
+                self.handle_join_request(msg.src().to_sender_node(sender)?, *join_request.clone())
+                    .await?;
+            }
+            Variant::ParsecRequest(version, request) => {
+                self.handle_parsec_request(
+                    *version,
+                    request.clone(),
+                    msg.src().to_sender_node(sender)?,
+                )
+                .await?;
+            }
+            Variant::ParsecResponse(version, response) => {
+                self.handle_parsec_response(*version, response.clone(), *msg.src().as_node()?)
+                    .await?;
+            }
+            Variant::BouncedUntrustedMessage(message) => {
+                self.handle_bounced_untrusted_message(
+                    msg.src().to_sender_node(sender)?,
+                    *msg.dst_key(),
+                    *message.clone(),
+                )
+                .await?;
+            }
+            Variant::BouncedUnknownMessage { src_key, message } => {
+                self.handle_bounced_unknown_message(
+                    msg.src().to_sender_node(sender)?,
+                    message.clone(),
+                    src_key,
+                )
+                .await?;
+            }
+            Variant::DKGMessage {
+                participants,
+                section_key_index,
+                message,
+            } => {
+                self.handle_dkg_message(
+                    participants.clone(),
+                    *section_key_index,
+                    message.clone(),
+                    *msg.src().as_node()?,
+                )
+                .await?;
+            }
+            Variant::DKGOldElders {
+                participants,
+                section_key_index,
+                public_key_set,
+            } => {
+                self.handle_dkg_old_elders(
+                    participants.clone(),
+                    *section_key_index,
+                    public_key_set.clone(),
+                    *msg.src().as_node()?,
+                )
+                .await?;
+            }
+            Variant::Vote {
+                content,
+                proof_share,
+            } => {
+                let result = self
+                    .handle_unordered_vote(content.clone(), proof_share.clone())
+                    .await;
+                if let Some(addr) = sender {
+                    self.check_lagging(&addr, proof_share).await?;
+                }
+
+                result?
+            }
+            Variant::UserMessage(_)
+            | Variant::NodeApproval(_)
+            | Variant::BootstrapResponse(_)
+            | Variant::Ping => unreachable!(),
+        }
+
+        Ok(())
     }
 
     // Ignore `JoinRequest` if we are not elder unless the join request is outdated in which case we
@@ -1201,7 +1289,7 @@ impl Approved {
             return Ok(());
         }*/
 
-        match self.decide_message_status(self.full_id.public_id(), &msg)? {
+        match self.decide_message_status(&msg)? {
             MessageStatus::Useful => {
                 //self.msg_filter.insert_incoming(&msg);
                 Ok(())
@@ -2505,55 +2593,4 @@ impl Approved {
 pub(crate) struct RelocateParams {
     pub conn_infos: Vec<SocketAddr>,
     pub details: SignedRelocateDetails,
-}
-
-// Create `EldersInfo` for the first node.
-fn create_first_elders_info(
-    pk_set: &bls::PublicKeySet,
-    sk_share: &bls::SecretKeyShare,
-    p2p_node: P2pNode,
-) -> Result<Proven<EldersInfo>> {
-    let name = *p2p_node.name();
-    let node = (name, p2p_node);
-    let elders_info = EldersInfo::new(iter::once(node).collect(), Prefix::default());
-    let proof = create_first_proof(pk_set, sk_share, &elders_info)?;
-    Ok(Proven::new(elders_info, proof))
-}
-
-fn create_first_shared_state(
-    pk_set: &bls::PublicKeySet,
-    sk_share: &bls::SecretKeyShare,
-    elders_info: Proven<EldersInfo>,
-) -> Result<SharedState> {
-    let mut shared_state = SharedState::new(elders_info.proof.public_key, elders_info);
-
-    for p2p_node in shared_state.sections.our().elders.values() {
-        let proof = create_first_proof(
-            pk_set,
-            sk_share,
-            &member_info::to_sign(p2p_node.name(), MemberState::Joined),
-        )?;
-        shared_state
-            .our_members
-            .add(p2p_node.clone(), MIN_AGE, proof);
-    }
-
-    Ok(shared_state)
-}
-
-fn create_first_proof<T: Serialize>(
-    pk_set: &bls::PublicKeySet,
-    sk_share: &bls::SecretKeyShare,
-    payload: &T,
-) -> Result<Proof> {
-    let bytes = bincode::serialize(payload)?;
-    let signature_share = sk_share.sign(&bytes);
-    let signature = pk_set
-        .combine_signatures(iter::once((0, &signature_share)))
-        .map_err(|_| RoutingError::InvalidSignatureShare)?;
-
-    Ok(Proof {
-        public_key: pk_set.public_key(),
-        signature,
-    })
 }

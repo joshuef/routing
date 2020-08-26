@@ -48,9 +48,9 @@ impl EventStream {
     /// Returns next event
     pub async fn next(&mut self) -> Option<Event> {
         while let Some((relay_event, msg)) = self.events_rx.recv().await {
-            // Shall we just relay the event?
+            // Shall we just relay the event to the user?
             if relay_event.is_some() {
-                info!("Relaying the event: {:?}", relay_event);
+                info!("Relaying the event to the user: {:?}", relay_event);
                 return relay_event;
             } else if let Some((src, message)) = msg {
                 // Process the message according to our stage
@@ -169,63 +169,6 @@ async fn handle_node_message(
                 trace!("not handling message - already handled: {:?}", msg);
                 return Ok(());
             }*/
-
-            /*
-            match self.decide_message_status(&msg)? {
-                MessageStatus::Useful => {
-                    //self.core.msg_filter.insert_incoming(&msg);
-                    self.handle_message(sender, msg).await
-                }
-                MessageStatus::Untrusted => {
-                    debug!("Untrusted message from {}: {:?} ", sender, msg);
-                    self.handle_untrusted_message(sender, msg).await
-                }
-                MessageStatus::Unknown => {
-                    debug!("Unknown message from {}: {:?} ", sender, msg);
-                    //self.handle_unknown_message(sender, msg).await
-                    Ok(())
-                }
-                MessageStatus::Useless => {
-                    debug!("Useless message from {}: {:?}", sender, msg);
-                    Ok(())
-                }
-            }
-            */
         }
     }
 }
-/*
-async fn handle_message(&mut self, sender: SocketAddr, msg: Message) -> Result<()> {
-    if let Stage::Approved(stage) = &mut self.stage {
-        stage.update_section_knowledge(&mut self.core, &msg).await?;
-    }
-
-    Ok(())
-}
-
-
-async fn handle_untrusted_message(&mut self, sender: SocketAddr, msg: Message) -> Result<()> {
-    match &self.stage {
-        Stage::Approved(stage) => {
-            stage
-                .handle_untrusted_message(&mut self.core, Some(sender), msg)
-                .await
-        }
-        Stage::Bootstrapping(_) | Stage::Joining(_) | Stage::Terminated => unreachable!(),
-    }
-}
-
-async fn handle_unknown_message(&mut self, sender: SocketAddr, msg: Message) -> Result<()> {
-    match &mut self.stage {
-        Stage::Bootstrapping(stage) => stage.handle_unknown_message(sender, msg),
-        Stage::Joining(stage) => stage.handle_unknown_message(sender, msg),
-        Stage::Approved(stage) => {
-            stage
-                .handle_unknown_message(&mut self.core, Some(sender), msg.to_bytes())
-                .await?
-        }
-        Stage::Terminated => (),
-    }
-
-    Ok(())
-}*/

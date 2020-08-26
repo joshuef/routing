@@ -16,21 +16,26 @@ use crate::{
 use bytes::Bytes;
 use hex_fmt::HexFmt;
 use quic_p2p::{Config, Connection, Endpoint, IncomingConnections, QuicP2p};
-use std::net::SocketAddr;
+use std::{boxed::Box, net::SocketAddr, sync::Arc};
 
 // Communication component of the node to interact with other nodes.
+#[derive(Clone)]
 pub(crate) struct Comm {
-    quic_p2p: QuicP2p,
-    endpoint: Endpoint,
+    quic_p2p: Arc<Box<QuicP2p>>,
+    endpoint: Arc<Box<Endpoint>>,
 }
 
 impl Comm {
     pub async fn new(transport_config: Config) -> Result<Self> {
-        let quic_p2p = QuicP2p::with_config(Some(transport_config), Default::default(), true)?;
+        let quic_p2p = Arc::new(Box::new(QuicP2p::with_config(
+            Some(transport_config),
+            Default::default(),
+            true,
+        )?));
 
         // Don't bootstrap, just create an endpoint where to listen to
         // the incoming messages from other nodes.
-        let endpoint = quic_p2p.new_endpoint()?;
+        let endpoint = Arc::new(Box::new(quic_p2p.new_endpoint()?));
 
         Ok(Self { quic_p2p, endpoint })
     }
@@ -43,6 +48,9 @@ impl Comm {
             .bootstrap()
             .await
             .map_err(|err| RoutingError::ToBeDefined(format!("{}", err)))?;
+
+        let quic_p2p = Arc::new(Box::new(quic_p2p));
+        let endpoint = Arc::new(Box::new(endpoint));
 
         Ok((Self { quic_p2p, endpoint }, connection))
     }
