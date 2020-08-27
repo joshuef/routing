@@ -240,7 +240,7 @@ impl Joining {
                 relocate_payload: relocate_payload.cloned(),
             };
 
-            info!("Sending {:?} to {}", join_request, dst);
+            info!("JoinRequest Sending {:?} to {}", join_request, dst);
             let variant = Variant::JoinRequest(Box::new(join_request));
             self.comm
                 .send_direct_message(&self.full_id, dst.peer_addr(), variant)

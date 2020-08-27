@@ -75,6 +75,8 @@ impl Approved {
         network_params: NetworkParams,
         mut rng: MainRng,
     ) -> Result<Self> {
+
+        trace!("Transitioning to approved!");
         let consensus_engine = ConsensusEngine::new(
             &mut rng,
             full_id.clone(),
@@ -358,8 +360,10 @@ impl Approved {
         self.handle_useful_message(Some(sender), msg).await
     }
 
-    fn decide_message_status(&self, msg: &Message) -> Result<MessageStatus> {
+    fn decide_message_status(&mut self, msg: &Message) -> Result<MessageStatus> {
         let our_id = self.full_id.public_id();
+
+        trace!("deciding message status based upon variant: {:?}", msg.variant());
         match msg.variant() {
             Variant::NeighbourInfo { .. } => {
                 if !self.is_our_elder(our_id) {
@@ -439,6 +443,10 @@ impl Approved {
             | Variant::BouncedUntrustedMessage(_)
             | Variant::BouncedUnknownMessage { .. } => (),
         }
+
+        // TODO: when should this actually be called?
+        // futures::executor::block_on(self.finish_handle_input());
+
 
         if self.verify_message(msg)? {
             Ok(MessageStatus::Useful)
@@ -1109,6 +1117,9 @@ impl Approved {
             age,
             their_knowledge,
         });
+
+
+        futures::executor::block_on(self.finish_handle_input());
 
         Ok(())
     }
@@ -2198,7 +2209,6 @@ impl Approved {
         self.comm
             .send_message_to_target(p2p_node.peer_addr(), message.to_bytes())
             .await?;
-
         Ok(())
     }
 
