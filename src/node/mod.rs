@@ -10,25 +10,25 @@ mod stage;
 #[cfg(all(test, feature = "mock"))]
 mod tests;
 
-#[cfg(feature = "mock_base")]
+#[cfg(feature = "mock")]
 pub use self::stage::{BOOTSTRAP_TIMEOUT, JOIN_TIMEOUT};
 
 use self::stage::{Approved, Bootstrapping, JoinParams, Joining, RelocateParams, Stage};
 use crate::{
+    consensus::Proven,
     core::Core,
     error::{Result, RoutingError},
     event::{Connected, Event},
     id::{FullId, P2pNode, PublicId},
     location::{DstLocation, SrcLocation},
     log_utils,
-    messages::{BootstrapResponse, EldersUpdate, Message, MessageStatus, QueuedMessage, Variant},
+    messages::{BootstrapResponse, Message, MessageStatus, QueuedMessage, Variant},
     network_params::NetworkParams,
     pause::PausedState,
     quic_p2p::{EventSenders, Peer, Token},
     relocation::SignedRelocateDetails,
     rng::{self, MainRng},
-    section::SectionProofChain,
-    section::SharedState,
+    section::{EldersInfo, SectionProofChain, SharedState},
     transport::PeerStatus,
     TransportConfig, TransportEvent,
 };
@@ -41,11 +41,11 @@ use xor_name::{Prefix, XorName};
 
 #[cfg(all(test, feature = "mock"))]
 use crate::{
-    consensus::{ConsensusEngine, DkgResult},
+    consensus::{DkgKey, DkgResult},
     section::SectionKeyShare,
 };
-#[cfg(feature = "mock_base")]
-use {crate::section::EldersInfo, std::collections::BTreeSet};
+#[cfg(feature = "mock")]
+use std::collections::BTreeSet;
 
 /// Node configuration.
 pub struct NodeConfig {
@@ -186,7 +186,7 @@ impl Node {
     /// Register the node event channels with the provided [selector](mpmc::Select).
     pub fn register<'a>(&'a mut self, select: &mut Select<'a>) {
         // Populate action_rx timeouts
-        #[cfg(feature = "mock_base")]
+        #[cfg(feature = "mock")]
         self.core.timer.process_timers();
 
         self.timer_rx_idx = select.recv(&self.timer_rx);
@@ -223,10 +223,6 @@ impl Node {
         };
 
         self.handle_messages();
-
-        if let Stage::Approved(stage) = &mut self.stage {
-            stage.finish_handle_input(&mut self.core);
-        }
 
         Ok(())
     }
@@ -274,14 +270,7 @@ impl Node {
     pub fn is_elder(&self) -> bool {
         self.stage
             .approved()
-            .map(|stage| {
-                stage
-                    .shared_state
-                    .sections
-                    .our()
-                    .elders
-                    .contains_key(self.core.name())
-            })
+            .map(|stage| stage.is_our_elder(self.core.id()))
             .unwrap_or(false)
     }
 
@@ -328,22 +317,6 @@ impl Node {
                 dst.contains(self.core.name(), stage.shared_state.our_prefix())
             }
             Stage::Terminated => false,
-        }
-    }
-
-    /// Vote for a user-defined event.
-    /// Returns `InvalidState` error if we are not an elder.
-    pub fn vote_for_user_event(&mut self, event: Vec<u8>) -> Result<()> {
-        let our_id = self.core.id();
-        if let Some(stage) = self
-            .stage
-            .approved_mut()
-            .filter(|stage| stage.is_our_elder(our_id))
-        {
-            stage.vote_for_user_event(event);
-            Ok(())
-        } else {
-            Err(RoutingError::InvalidState)
         }
     }
 
@@ -531,7 +504,9 @@ impl Node {
 
     fn handle_peer_lost(&mut self, peer_addr: SocketAddr) {
         if let Stage::Approved(stage) = &mut self.stage {
-            stage.handle_peer_lost(&self.core, peer_addr);
+            if let Err(error) = stage.handle_peer_lost(&mut self.core, peer_addr) {
+                error!("failed to handle lost peer {}: {}", peer_addr, error);
+            }
         }
     }
 
@@ -648,9 +623,9 @@ impl Node {
                 Variant::NodeApproval(payload) => {
                     let connect_type = stage.connect_type();
                     let msg_backlog = stage.take_message_backlog();
-                    let section_key = *msg.proof_chain_last_key()?;
+                    let section_chain = msg.proof_chain()?.clone();
 
-                    self.approve(connect_type, msg_backlog, section_key, payload.clone())?
+                    self.approve(connect_type, msg_backlog, section_chain, payload.clone())?
                 }
                 _ => unreachable!(),
             },
@@ -663,24 +638,18 @@ impl Node {
                         *msg.proof_chain_last_key()?,
                     )?;
                 }
-                Variant::EldersUpdate(payload) => {
-                    let section_key = *msg.proof_chain_last_key()?;
-                    stage.handle_elders_update(&mut self.core, section_key, payload.clone())?
+                Variant::Sync(shared_state) => {
+                    stage.handle_sync(&mut self.core, shared_state.clone())?
                 }
-                Variant::Promote {
-                    shared_state,
-                    parsec_version,
-                } => stage.handle_promote(&mut self.core, shared_state.clone(), *parsec_version)?,
-                Variant::NotifyLagging {
-                    shared_state,
-                    parsec_version,
-                } => stage.handle_lagging(&mut self.core, shared_state.clone(), *parsec_version)?,
                 Variant::Relocate(_) => {
                     msg.src().check_is_section()?;
                     let signed_relocate = SignedRelocateDetails::new(msg)?;
                     if let Some(params) = stage.handle_relocate(&mut self.core, signed_relocate) {
                         self.relocate(params)
                     }
+                }
+                Variant::RelocatePromise(promise) => {
+                    stage.handle_relocate_promise(&mut self.core, *promise, msg.to_bytes())?
                 }
                 Variant::MessageSignature(accumulating_msg) => {
                     let result = stage.handle_message_signature(
@@ -702,23 +671,7 @@ impl Node {
                     &mut self.core,
                     msg.src().to_sender_node(sender)?,
                     *join_request.clone(),
-                ),
-                Variant::ParsecRequest(version, request) => {
-                    stage.handle_parsec_request(
-                        &mut self.core,
-                        *version,
-                        request.clone(),
-                        msg.src().to_sender_node(sender)?,
-                    )?;
-                }
-                Variant::ParsecResponse(version, response) => {
-                    stage.handle_parsec_response(
-                        &mut self.core,
-                        *version,
-                        response.clone(),
-                        *msg.src().as_node()?,
-                    )?;
-                }
+                )?,
                 Variant::UserMessage(content) => {
                     self.core.send_event(Event::MessageReceived {
                         content: content.clone(),
@@ -740,28 +693,21 @@ impl Node {
                         message.clone(),
                         src_key,
                     ),
-                Variant::DKGMessage {
-                    participants,
-                    section_key_index,
-                    message,
-                } => {
+                Variant::DKGMessage { dkg_key, message } => {
                     stage.handle_dkg_message(
                         &mut self.core,
-                        participants.clone(),
-                        *section_key_index,
+                        dkg_key,
                         message.clone(),
                         *msg.src().as_node()?,
                     )?;
                 }
                 Variant::DKGOldElders {
-                    participants,
-                    section_key_index,
+                    dkg_key,
                     public_key_set,
                 } => {
                     stage.handle_dkg_old_elders(
                         &mut self.core,
-                        participants.clone(),
-                        *section_key_index,
+                        dkg_key,
                         public_key_set.clone(),
                         *msg.src().as_node()?,
                     )?;
@@ -840,21 +786,16 @@ impl Node {
         &mut self,
         connect_type: Connected,
         msg_backlog: Vec<QueuedMessage>,
-        section_key: bls::PublicKey,
-        elders_update: EldersUpdate,
+        section_chain: SectionProofChain,
+        elders_info: Proven<EldersInfo>,
     ) -> Result<()> {
         info!(
             "This node has been approved to join the network at {:?}!",
-            elders_update.elders_info.value.prefix,
+            elders_info.value.prefix,
         );
 
-        let shared_state = SharedState::new(section_key, elders_update.elders_info);
-        let stage = Approved::new(
-            &mut self.core,
-            shared_state,
-            elders_update.parsec_version,
-            None,
-        )?;
+        let shared_state = SharedState::new(section_chain, elders_info);
+        let stage = Approved::new(shared_state, None)?;
         self.stage = Stage::Approved(stage);
 
         self.core.msg_queue.extend(msg_backlog);
@@ -912,7 +853,7 @@ impl Node {
     }
 }
 
-#[cfg(feature = "mock_base")]
+#[cfg(feature = "mock")]
 impl Node {
     /// Returns whether the node is approved member of a section.
     pub fn is_approved(&self) -> bool {
@@ -920,27 +861,6 @@ impl Node {
             .approved()
             .map(|stage| stage.is_ready(&self.core))
             .unwrap_or(false)
-    }
-
-    /// Indicates if there are any pending observations in the parsec object
-    pub fn has_unpolled_observations(&self) -> bool {
-        self.stage
-            .approved()
-            .map(|stage| {
-                stage
-                    .consensus_engine
-                    .parsec_map()
-                    .has_unpolled_observations()
-            })
-            .unwrap_or(false)
-    }
-
-    /// Returns the version of the latest Parsec instance of this node.
-    pub fn parsec_last_version(&self) -> u64 {
-        self.stage
-            .approved()
-            .map(|stage| stage.consensus_engine.parsec_version())
-            .unwrap_or(0)
     }
 
     /// Checks whether the given location represents self.
@@ -998,7 +918,7 @@ impl Node {
     /// Returns whether the given `XorName` is a member of our section.
     pub fn is_peer_our_member(&self, name: &XorName) -> bool {
         self.shared_state()
-            .map(|state| state.our_members.contains(name))
+            .map(|state| state.our_members.is_joined(name))
             .unwrap_or(false)
     }
 
@@ -1042,14 +962,12 @@ impl Node {
         self.shared_state().map(|state| state.prove(target, None))
     }
 
-    /// If this node is elder and `name` belongs to a member of our section, returns the age
-    /// counter of that member. Otherwise returns `None`.
-    pub fn member_age_counter(&self, name: &XorName) -> Option<u32> {
+    /// Returns the age of the node with `name` if this node knows it. Otherwise returns `None`.
+    pub fn member_age(&self, name: &XorName) -> Option<u8> {
         self.stage
             .approved()
-            .filter(|stage| stage.is_our_elder(self.core.id()))
             .and_then(|stage| stage.shared_state.our_members.get(name))
-            .map(|info| info.age_counter_value())
+            .map(|info| info.age)
     }
 
     /// Returns the latest BLS public key of our section or `None` if we are not joined yet.
@@ -1070,17 +988,15 @@ impl Node {
     pub(crate) fn approved(
         config: NodeConfig,
         shared_state: SharedState,
-        parsec_version: u64,
         section_key_share: Option<SectionKeyShare>,
     ) -> (Self, Receiver<Event>, Receiver<TransportEvent>) {
         let (timer_tx, timer_rx) = crossbeam_channel::unbounded();
         let (transport_tx, transport_node_rx, transport_client_rx) = transport_channels();
         let (user_event_tx, user_event_rx) = crossbeam_channel::unbounded();
 
-        let mut core = Core::new(config, timer_tx, transport_tx, user_event_tx);
+        let core = Core::new(config, timer_tx, transport_tx, user_event_tx);
 
-        let stage =
-            Approved::new(&mut core, shared_state, parsec_version, section_key_share).unwrap();
+        let stage = Approved::new(shared_state, section_key_share).unwrap();
         let stage = Stage::Approved(stage);
 
         let node = Self {
@@ -1095,36 +1011,14 @@ impl Node {
         (node, user_event_rx, transport_client_rx)
     }
 
-    pub(crate) fn consensus_engine(&self) -> Result<&ConsensusEngine> {
-        if let Some(stage) = self.stage.approved() {
-            Ok(&stage.consensus_engine)
-        } else {
-            Err(RoutingError::InvalidState)
-        }
-    }
-
-    pub(crate) fn consensus_engine_mut(&mut self) -> Result<&mut ConsensusEngine> {
-        if let Some(stage) = self.stage.approved_mut() {
-            Ok(&mut stage.consensus_engine)
-        } else {
-            Err(RoutingError::InvalidState)
-        }
-    }
-
     // Simulate DKG completion
     pub(crate) fn handle_dkg_result_event(
         &mut self,
-        participants: &BTreeSet<PublicId>,
-        section_key_index: u64,
+        dkg_key: &DkgKey,
         dkg_result: &DkgResult,
     ) -> Result<()> {
         if let Some(stage) = self.stage.approved_mut() {
-            stage.handle_dkg_result_event(
-                &mut self.core,
-                participants,
-                section_key_index,
-                dkg_result,
-            )
+            stage.handle_dkg_result_event(&mut self.core, dkg_key, dkg_result)
         } else {
             Err(RoutingError::InvalidState)
         }

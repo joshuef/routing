@@ -12,7 +12,6 @@ mod message_accumulator;
 mod src_authority;
 mod variant;
 
-pub(crate) use self::variant::EldersUpdate;
 pub(crate) use self::{
     accumulating_message::{AccumulatingMessage, PlainMessage},
     message_accumulator::MessageAccumulator,
@@ -246,22 +245,20 @@ impl Message {
     }
 
     /// Returns the attached proof chain, if any.
-    #[cfg(all(test, feature = "mock"))]
-    pub(crate) fn proof_chain(&self) -> Option<&SectionProofChain> {
-        self.proof_chain.as_ref()
+    pub(crate) fn proof_chain(&self) -> Result<&SectionProofChain> {
+        self.proof_chain
+            .as_ref()
+            .ok_or(RoutingError::InvalidMessage)
     }
 
     /// Returns the last key of the attached the proof chain, if any.
     pub(crate) fn proof_chain_last_key(&self) -> Result<&bls::PublicKey> {
-        self.proof_chain
-            .as_ref()
-            .map(|proof_chain| proof_chain.last_key())
-            .ok_or(RoutingError::InvalidMessage)
+        self.proof_chain().map(|proof_chain| proof_chain.last_key())
     }
 
     // Extend the current message proof chain so it starts at `new_first_key` while keeping the
     // last key (and therefore the signature) intact.
-    #[cfg_attr(feature = "mock_base", allow(clippy::trivially_copy_pass_by_ref))]
+    #[cfg_attr(feature = "mock", allow(clippy::trivially_copy_pass_by_ref))]
     pub(crate) fn extend_proof_chain(
         mut self,
         new_first_key: &bls::PublicKey,
@@ -402,16 +399,12 @@ mod tests {
 
         let mut full_proof_chain = SectionProofChain::new(sk0.public_key());
         let pk1_sig = sk0.sign(&bincode::serialize(&pk1).unwrap());
-        full_proof_chain.push(pk1, pk1_sig);
+        let _ = full_proof_chain.push(pk1, pk1_sig);
 
         let (elders_info, _) = section::gen_elders_info(&mut rng, Default::default(), 3);
         let elders_info = consensus::test_utils::proven(&sk1, elders_info);
 
-        let elders_update = EldersUpdate {
-            elders_info,
-            parsec_version: 1,
-        };
-        let variant = Variant::EldersUpdate(elders_update);
+        let variant = Variant::NodeApproval(elders_info);
         let message = Message::single_src(
             &full_id,
             DstLocation::Direct,

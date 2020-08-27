@@ -7,11 +7,9 @@
 // permissions and limitations relating to use of the SAFE Network Software.
 
 use crate::{
-    crypto::{encryption, signing},
-    rng::{self, MainRng},
+    crypto::{self, PublicKey, SecretKey, Signature},
+    rng::MainRng,
 };
-use bincode::{deserialize, serialize};
-use rand::Rng;
 use serde::{de::Deserialize, Deserializer, Serialize, Serializer};
 use std::{
     cmp::Ordering,
@@ -27,48 +25,36 @@ use xor_name::XorName;
 #[derive(Clone)]
 pub struct FullId {
     public_id: PublicId,
-    // Keep the secret keys in Rc to allow Clone while also preventing multiple copies to exist in
-    // memory which might be unsafe.
-    secret_keys: Rc<SecretKeys>,
+    // Keep the secret key in Rc to allow Clone while also preventing multiple copies to exist in
+    // memory which might be insecure.
+    secret_key: Rc<SecretKey>,
 }
 
 impl FullId {
     /// Construct a `FullId` with randomly generated keys.
     pub fn gen(rng: &mut MainRng) -> Self {
-        let secret_signing_key = signing::SecretKey::generate(rng);
-        let public_signing_key = signing::PublicKey::from(&secret_signing_key);
+        let secret_key = SecretKey::generate(rng);
+        let public_key = PublicKey::from(&secret_key);
 
-        let secret_encryption_key: encryption::SecretKey = rng.gen();
-        let public_encryption_key = secret_encryption_key.public_key();
-
-        let public_id = PublicId::new(public_signing_key, public_encryption_key);
+        let public_id = PublicId::new(public_key);
 
         Self {
             public_id,
-            secret_keys: Rc::new(SecretKeys {
-                signing: secret_signing_key,
-                encryption: secret_encryption_key,
-            }),
+            secret_key: Rc::new(secret_key),
         }
     }
 
     /// Construct a `FullId` whose name is in the interval [start, end] (both endpoints inclusive).
     pub fn within_range(rng: &mut MainRng, range: &RangeInclusive<XorName>) -> Self {
         loop {
-            let secret_signing_key = signing::SecretKey::generate(rng);
-            let public_signing_key = signing::PublicKey::from(&secret_signing_key);
-            let name = name_from_key(&public_signing_key);
+            let secret_key = SecretKey::generate(rng);
+            let public_key = PublicKey::from(&secret_key);
+            let name = name_from_key(&public_key);
 
             if range.contains(&name) {
-                let secret_encryption_key: encryption::SecretKey = rng.gen();
-                let public_encryption_key = secret_encryption_key.public_key();
-
                 return Self {
-                    public_id: PublicId::new(public_signing_key, public_encryption_key),
-                    secret_keys: Rc::new(SecretKeys {
-                        signing: secret_signing_key,
-                        encryption: secret_encryption_key,
-                    }),
+                    public_id: PublicId::new(public_key),
+                    secret_key: Rc::new(secret_key),
                 };
             }
         }
@@ -85,37 +71,8 @@ impl FullId {
     }
 
     /// Sign a message.
-    pub fn sign(&self, message: &[u8]) -> signing::Signature {
-        signing::sign(
-            message,
-            self.public_id.public_signing_key(),
-            &self.secret_keys.signing,
-        )
-    }
-}
-
-impl parsec::SecretId for FullId {
-    type PublicId = PublicId;
-
-    fn public_id(&self) -> &Self::PublicId {
-        self.public_id()
-    }
-
-    fn sign_detached(&self, data: &[u8]) -> <Self::PublicId as parsec::PublicId>::Signature {
-        self.sign(data)
-    }
-
-    fn encrypt<M: AsRef<[u8]>>(&self, to: &Self::PublicId, plaintext: M) -> Option<Vec<u8>> {
-        let mut rng = rng::new();
-        let ciphertext = to
-            .public_encryption_key
-            .encrypt_with_rng(&mut rng, plaintext);
-        serialize(&ciphertext).ok()
-    }
-
-    fn decrypt(&self, _from: &Self::PublicId, ciphertext: &[u8]) -> Option<Vec<u8>> {
-        let ciphertext: encryption::Ciphertext = deserialize(ciphertext).ok()?;
-        self.secret_keys.encryption.decrypt(&ciphertext)
+    pub fn sign(&self, message: &[u8]) -> Signature {
+        crypto::sign(message, self.public_id.public_key(), &self.secret_key)
     }
 }
 
@@ -127,25 +84,45 @@ impl bls_dkg::id::SecretId for FullId {
     }
 }
 
-struct SecretKeys {
-    signing: signing::SecretKey,
-    encryption: encryption::SecretKey,
-}
-
 /// Network identity component containing name and public keys.
 ///
 /// Note that the `name` member is omitted when serialising `PublicId` and is calculated from the
-/// `public_signing_key` when deserialising.
-#[derive(Hash, PartialEq, Eq, PartialOrd, Ord, Copy, Clone)]
+/// `public_key` when deserialising.
+#[derive(Copy, Clone)]
 pub struct PublicId {
     name: XorName,
-    public_signing_key: signing::PublicKey,
-    public_encryption_key: encryption::PublicKey,
+    public_key: PublicKey,
+}
+
+impl PartialEq for PublicId {
+    fn eq(&self, other: &Self) -> bool {
+        self.name.eq(&other.name)
+    }
+}
+
+impl Eq for PublicId {}
+
+impl Hash for PublicId {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        self.name.hash(state)
+    }
+}
+
+impl Ord for PublicId {
+    fn cmp(&self, other: &Self) -> Ordering {
+        self.name.cmp(&other.name)
+    }
+}
+
+impl PartialOrd for PublicId {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        Some(self.cmp(other))
+    }
 }
 
 impl Debug for PublicId {
     fn fmt(&self, formatter: &mut Formatter) -> fmt::Result {
-        write!(formatter, "PublicId(name: {})", self.name())
+        write!(formatter, "PublicId({})", self.name())
     }
 }
 
@@ -157,27 +134,19 @@ impl Display for PublicId {
 
 impl Serialize for PublicId {
     fn serialize<S: Serializer>(&self, serialiser: S) -> Result<S::Ok, S::Error> {
-        (&self.public_signing_key, &self.public_encryption_key).serialize(serialiser)
+        self.public_key.serialize(serialiser)
     }
 }
 
 impl<'de> Deserialize<'de> for PublicId {
     fn deserialize<D: Deserializer<'de>>(deserialiser: D) -> Result<Self, D::Error> {
-        let (public_signing_key, public_encryption_key) = Deserialize::deserialize(deserialiser)?;
-        Ok(Self::new(public_signing_key, public_encryption_key))
-    }
-}
-
-impl parsec::PublicId for PublicId {
-    type Signature = signing::Signature;
-
-    fn verify_signature(&self, signature: &Self::Signature, data: &[u8]) -> bool {
-        self.verify(data, signature)
+        let public_key = Deserialize::deserialize(deserialiser)?;
+        Ok(Self::new(public_key))
     }
 }
 
 impl bls_dkg::id::PublicId for PublicId {
-    type Signature = signing::Signature;
+    type Signature = Signature;
 
     fn verify_signature(&self, signature: &Self::Signature, data: &[u8]) -> bool {
         self.verify(data, signature)
@@ -191,28 +160,20 @@ impl PublicId {
     }
 
     /// Verifies this id signed a message
-    pub fn verify(&self, message: &[u8], sig: &signing::Signature) -> bool {
-        self.public_signing_key.verify(message, sig).is_ok()
+    pub fn verify(&self, message: &[u8], sig: &Signature) -> bool {
+        use ed25519_dalek::Verifier;
+        self.public_key.verify(message, &sig.0).is_ok()
     }
 
     /// Returns public signing key.
-    pub fn public_signing_key(&self) -> &signing::PublicKey {
-        &self.public_signing_key
+    pub fn public_key(&self) -> &PublicKey {
+        &self.public_key
     }
 
-    /// Returns public encryption key.
-    pub fn public_encryption_key(&self) -> &encryption::PublicKey {
-        &self.public_encryption_key
-    }
-
-    fn new(
-        public_signing_key: signing::PublicKey,
-        public_encryption_key: encryption::PublicKey,
-    ) -> Self {
+    fn new(public_key: PublicKey) -> Self {
         Self {
-            name: name_from_key(&public_signing_key),
-            public_signing_key,
-            public_encryption_key,
+            name: name_from_key(&public_key),
+            public_key,
         }
     }
 }
@@ -223,7 +184,7 @@ impl AsRef<XorName> for PublicId {
     }
 }
 
-fn name_from_key(public_key: &signing::PublicKey) -> XorName {
+fn name_from_key(public_key: &PublicKey) -> XorName {
     XorName(public_key.to_bytes())
 }
 
@@ -317,8 +278,8 @@ mod tests {
     #[test]
     fn serialisation() {
         let full_id = FullId::gen(&mut rng::new());
-        let serialised = serialize(full_id.public_id()).unwrap();
-        let parsed = deserialize(&serialised).unwrap();
+        let serialised = bincode::serialize(full_id.public_id()).unwrap();
+        let parsed = bincode::deserialize(&serialised).unwrap();
         assert_eq!(*full_id.public_id(), parsed);
     }
 }

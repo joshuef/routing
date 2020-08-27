@@ -9,7 +9,7 @@
 use std::{
     borrow::Borrow,
     cmp::Ordering,
-    collections::BTreeSet,
+    collections::{btree_set, BTreeSet},
     fmt::{self, Debug, Formatter},
     hash::{Hash, Hasher},
     iter::FromIterator,
@@ -49,6 +49,8 @@ where
     /// Does not insert anything if any descendant of the prefix of `entry` is already present in
     /// the map.
     /// Returns the previous entry with the same prefix, if any.
+    // TODO: change to return `bool` indicating whether anything changed. It's more useful for our
+    // purposes.
     pub fn insert(&mut self, entry: T) -> Option<T> {
         // Don't insert if any descendant is already present in the map.
         if self.descendants(entry.borrow()).next().is_some() {
@@ -167,6 +169,28 @@ where
             let _ = map.insert(entry);
             map
         })
+    }
+}
+
+pub struct IntoIter<T>(btree_set::IntoIter<Entry<T>>);
+
+impl<T> Iterator for IntoIter<T> {
+    type Item = T;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        self.0.next().map(|entry| entry.0)
+    }
+}
+
+impl<T> IntoIterator for PrefixMap<T>
+where
+    T: Borrow<Prefix>,
+{
+    type Item = T;
+    type IntoIter = IntoIter<T>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        IntoIter(self.0.into_iter())
     }
 }
 

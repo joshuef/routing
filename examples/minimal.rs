@@ -92,8 +92,8 @@ struct Options {
 }
 
 fn main() {
-    if cfg!(feature = "mock_base") {
-        panic!("This example must be built without the `mock_base` feature");
+    if cfg!(feature = "mock") {
+        panic!("This example must be built without the `mock` feature");
     }
 
     let opts = Options::from_args();
@@ -353,10 +353,11 @@ fn handle_event(
             dst,
             HexFmt(content)
         ),
-        Event::Consensus(payload) => log::info!(
-            "Node #{} reached consensus - payload: {}",
+        Event::RelocationInitiated { name, destination } => log::debug!(
+            "Node #{} initiated relocation of {} to {}",
             index,
-            HexFmt(payload)
+            name,
+            destination
         ),
         Event::Terminated => {
             log::info!("Node #{} terminated", index);

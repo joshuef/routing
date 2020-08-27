@@ -8,17 +8,15 @@
 
 use super::{AccumulatingMessage, Message, MessageHash, VerifyStatus};
 use crate::{
-    consensus::{ParsecRequest, ParsecResponse, ProofShare, Proven, Vote},
+    consensus::{DkgKey, ProofShare, Proven, Vote},
     error::{Result, RoutingError},
-    id::PublicId,
-    relocation::{RelocateDetails, RelocatePayload},
+    relocation::{RelocateDetails, RelocatePayload, RelocatePromise},
     section::{EldersInfo, SectionProofChain, SharedState, TrustStatus},
 };
 use bytes::Bytes;
 use hex_fmt::HexFmt;
 use serde::Serialize;
 use std::{
-    collections::BTreeSet,
     fmt::{self, Debug, Formatter},
     net::SocketAddr,
 };
@@ -41,21 +39,15 @@ pub(crate) enum Variant {
     UserMessage(Vec<u8>),
     /// Message sent to newly joined node containing the necessary info to become a member of our
     /// section.
-    NodeApproval(EldersUpdate),
-    /// Message sent to non-elders to update them about the current section elders.
-    EldersUpdate(EldersUpdate),
-    /// Message sent to newly promoted elders to notify them about the promotion.
-    Promote {
-        shared_state: SharedState,
-        parsec_version: u64,
-    },
-    /// Message sent to a lagging peer.
-    NotifyLagging {
-        shared_state: SharedState,
-        parsec_version: u64,
-    },
-    /// Send from a section to the node being relocated.
+    NodeApproval(Proven<EldersInfo>),
+    /// Message sent to all members to update them about the state of our section.
+    Sync(SharedState),
+    /// Send from a section to the node to be immediately relocated.
     Relocate(RelocateDetails),
+    /// Send:
+    /// - from a section to a current elder to be relocated after they are demoted.
+    /// - from the node to be relocated back to its section after it was demoted.
+    RelocatePromise(RelocatePromise),
     /// Sent from members of a section message's source location to the first hop. The
     /// message will only be relayed once enough signatures have been accumulated.
     MessageSignature(Box<AccumulatingMessage>),
@@ -68,10 +60,6 @@ pub(crate) enum Variant {
     /// Sent from a bootstrapping peer to the section that responded with a
     /// `BootstrapResponse::Join` to its `BootstrapRequest`.
     JoinRequest(Box<JoinRequest>),
-    /// Parsec request message
-    ParsecRequest(u64, ParsecRequest),
-    /// Parsec response message
-    ParsecResponse(u64, ParsecResponse),
     /// Message sent to a disconnected peer to trigger lost peer detection.
     Ping,
     /// Sent from a node that can't establish the trust of the contained message to its original
@@ -88,20 +76,14 @@ pub(crate) enum Variant {
     /// Message exchanged for DKG process.
     DKGMessage {
         /// The identifier of the key_gen instance this message is about.
-        /// Currently just using the participants.
-        /// TODO: may need to consider using other unique identifying approach.
-        participants: BTreeSet<PublicId>,
-        /// The section key index this DKG message related to.
-        section_key_index: u64,
+        dkg_key: DkgKey,
         /// The serialized DKG message.
         message: Bytes,
     },
     /// Message of notify old elders that DKG completed. Mainly used during split or demote.
     DKGOldElders {
-        /// Participants of the DKG
-        participants: BTreeSet<PublicId>,
-        /// Section key index of the DKG
-        section_key_index: u64,
+        /// The identifier of the key_gen instance this message is about.
+        dkg_key: DkgKey,
         /// Public key set that got consensused
         public_key_set: bls::PublicKeySet,
     },
@@ -122,12 +104,22 @@ impl Variant {
         I: IntoIterator<Item = &'a bls::PublicKey>,
     {
         match self {
-            Self::NodeApproval(payload) | Self::EldersUpdate(payload) => {
+            Self::NodeApproval(elders_info) => {
                 let proof_chain = proof_chain.ok_or(RoutingError::InvalidMessage)?;
-                payload.verify(proof_chain, trusted_keys)
+
+                if !elders_info.verify(proof_chain) {
+                    return Err(RoutingError::UntrustedMessage);
+                }
+
+                match proof_chain.check_trust(trusted_keys) {
+                    TrustStatus::Trusted => Ok(VerifyStatus::Full),
+                    TrustStatus::Unknown => Ok(VerifyStatus::Unknown),
+                    TrustStatus::Invalid => Err(RoutingError::UntrustedMessage),
+                }
             }
             Self::NeighbourInfo { elders_info, .. } => {
                 let proof_chain = proof_chain.ok_or(RoutingError::InvalidMessage)?;
+
                 if !elders_info.verify(proof_chain) {
                     return Err(RoutingError::UntrustedMessage);
                 }
@@ -153,32 +145,17 @@ impl Debug for Variant {
                 .finish(),
             Self::UserMessage(payload) => write!(f, "UserMessage({:10})", HexFmt(payload)),
             Self::NodeApproval(payload) => write!(f, "NodeApproval({:?})", payload),
-            Self::EldersUpdate(payload) => write!(f, "EldersUpdate({:?})", payload),
-            Self::Promote {
-                shared_state,
-                parsec_version,
-            } => f
-                .debug_struct("Promote")
+            Self::Sync(shared_state) => f
+                .debug_struct("Sync")
                 .field("elders_info", shared_state.sections.our())
                 .field("section_key", shared_state.our_history.last_key())
-                .field("parsec_version", parsec_version)
-                .finish(),
-            Self::NotifyLagging {
-                shared_state,
-                parsec_version,
-            } => f
-                .debug_struct("NotifyLagging")
-                .field("elders_info", shared_state.sections.our())
-                .field("section_key", shared_state.our_history.last_key())
-                .field("parsec_version", parsec_version)
                 .finish(),
             Self::Relocate(payload) => write!(f, "Relocate({:?})", payload),
+            Self::RelocatePromise(payload) => write!(f, "RelocatePromise({:?})", payload),
             Self::MessageSignature(payload) => write!(f, "MessageSignature({:?})", payload.content),
             Self::BootstrapRequest(payload) => write!(f, "BootstrapRequest({})", payload),
             Self::BootstrapResponse(payload) => write!(f, "BootstrapResponse({:?})", payload),
             Self::JoinRequest(payload) => write!(f, "JoinRequest({:?})", payload),
-            Self::ParsecRequest(version, _) => write!(f, "ParsecRequest({}, ..)", version),
-            Self::ParsecResponse(version, _) => write!(f, "ParsecResponse({}, ..)", version),
             Self::Ping => write!(f, "Ping"),
             Self::BouncedUntrustedMessage(message) => f
                 .debug_tuple("BouncedUntrustedMessage")
@@ -189,24 +166,19 @@ impl Debug for Variant {
                 .field("src_key", src_key)
                 .field("message_hash", &MessageHash::from_bytes(message))
                 .finish(),
-            Self::DKGMessage {
-                participants,
-                section_key_index,
-                message,
-            } => f
+            Self::DKGMessage { dkg_key, message } => f
                 .debug_struct("DKGMessage")
-                .field("participants", participants)
-                .field("section_key_index", section_key_index)
+                .field("participants", &dkg_key.0)
+                .field("section_key_index", &dkg_key.1)
                 .field("message_hash", &MessageHash::from_bytes(message))
                 .finish(),
             Self::DKGOldElders {
-                participants,
-                section_key_index,
+                dkg_key,
                 public_key_set,
             } => f
-                .debug_struct("DKGMessage")
-                .field("participants", participants)
-                .field("section_key_index", section_key_index)
+                .debug_struct("DKGOldElders")
+                .field("participants", &dkg_key.0)
+                .field("section_key_index", &dkg_key.1)
                 .field("public_key_set", public_key_set)
                 .finish(),
             Self::Vote {
@@ -256,48 +228,6 @@ impl Debug for JoinRequest {
                     .as_ref()
                     .map(|payload| payload.relocate_details()),
             )
-            .finish()
-    }
-}
-
-#[derive(Clone, Eq, PartialEq, Hash, Serialize, Deserialize)]
-pub struct EldersUpdate {
-    pub elders_info: Proven<EldersInfo>,
-    // TODO: this should have signature too.
-    pub parsec_version: u64,
-}
-
-impl EldersUpdate {
-    pub fn verify<'a, I>(
-        &self,
-        proof_chain: &SectionProofChain,
-        trusted_keys: I,
-    ) -> Result<VerifyStatus>
-    where
-        I: IntoIterator<Item = &'a bls::PublicKey>,
-    {
-        if !self.elders_info.self_verify() {
-            return Err(RoutingError::FailedSignature);
-        }
-
-        if !proof_chain.has_key(&self.elders_info.proof.public_key) {
-            return Err(RoutingError::UntrustedMessage);
-        }
-
-        match proof_chain.check_trust(trusted_keys) {
-            TrustStatus::Trusted => Ok(VerifyStatus::Full),
-            TrustStatus::Unknown => Ok(VerifyStatus::Unknown),
-            TrustStatus::Invalid => Err(RoutingError::UntrustedMessage),
-        }
-    }
-}
-
-impl Debug for EldersUpdate {
-    fn fmt(&self, formatter: &mut Formatter) -> fmt::Result {
-        formatter
-            .debug_struct("EldersUpdate")
-            .field("elders_info", &self.elders_info)
-            .field("parsec_version", &self.parsec_version)
             .finish()
     }
 }

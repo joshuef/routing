@@ -8,7 +8,7 @@
 
 use crate::{
     core::Core,
-    error::Result,
+    error::{Result, RoutingError},
     event::Connected,
     id::P2pNode,
     messages::{
@@ -76,16 +76,13 @@ impl Joining {
     pub fn decide_message_status(&self, msg: &Message) -> Result<MessageStatus> {
         match msg.variant() {
             Variant::NodeApproval(_) => {
-                match &self.join_type {
+                let trusted_key = match &self.join_type {
                     JoinType::Relocate(payload) => {
-                        let details = payload.relocate_details();
-                        verify_message(msg, Some(&details.destination_key))?;
+                        Some(&payload.relocate_details().destination_key)
                     }
-                    JoinType::First { .. } => {
-                        // We don't have any trusted keys to verify this message, but we still need to
-                        // handle it.
-                    }
-                }
+                    JoinType::First { .. } => None,
+                };
+                verify_message(msg, trusted_key)?;
                 Ok(MessageStatus::Useful)
             }
 
@@ -96,9 +93,9 @@ impl Joining {
 
             Variant::NeighbourInfo { .. }
             | Variant::UserMessage(_)
-            | Variant::EldersUpdate { .. }
-            | Variant::Promote { .. }
+            | Variant::Sync { .. }
             | Variant::Relocate(_)
+            | Variant::RelocatePromise(_)
             | Variant::MessageSignature(_)
             | Variant::BouncedUntrustedMessage(_)
             | Variant::BouncedUnknownMessage { .. }
@@ -109,9 +106,6 @@ impl Joining {
             Variant::BootstrapRequest(_)
             | Variant::BootstrapResponse(_)
             | Variant::JoinRequest(_)
-            | Variant::ParsecRequest(..)
-            | Variant::ParsecResponse(..)
-            | Variant::NotifyLagging { .. }
             | Variant::Ping => Ok(MessageStatus::Useless),
         }
     }
@@ -202,7 +196,10 @@ fn verify_message(msg: &Message, trusted_key: Option<&bls::PublicKey>) -> Result
     let prefix = Prefix::default();
 
     msg.verify(trusted_key.map(|key| (&prefix, key)))
-        .and_then(VerifyStatus::require_full)
+        .and_then(|status| match (status, trusted_key) {
+            (VerifyStatus::Full, _) | (VerifyStatus::Unknown, None) => Ok(()),
+            (VerifyStatus::Unknown, Some(_)) => Err(RoutingError::UntrustedMessage),
+        })
         .map_err(|error| {
             messages::log_verify_failure(msg, &error, trusted_key.map(|key| (&prefix, key)));
             error

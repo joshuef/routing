@@ -16,7 +16,7 @@ pub(crate) use self::{
     joining::Joining,
 };
 
-#[cfg(feature = "mock_base")]
+#[cfg(feature = "mock")]
 pub use self::{bootstrapping::BOOTSTRAP_TIMEOUT, joining::JOIN_TIMEOUT};
 
 // Type to represent the various stages a node goes through during its lifetime.
@@ -36,6 +36,7 @@ impl Stage {
         }
     }
 
+    #[cfg(all(test, feature = "mock"))]
     pub fn approved_mut(&mut self) -> Option<&mut Approved> {
         match self {
             Self::Approved(stage) => Some(stage),

@@ -6,9 +6,8 @@
 // KIND, either express or implied. Please review the Licences for the specific language governing
 // permissions and limitations relating to use of the SAFE Network Software.
 
-pub mod member_info;
-
 mod elders_info;
+mod member_info;
 mod network_stats;
 mod prefix_map;
 mod section_keys;
@@ -20,14 +19,18 @@ mod shared_state;
 
 #[cfg(test)]
 pub(crate) use self::elders_info::gen_elders_info;
-pub(crate) use self::shared_state::{SharedState, UpdateSectionKnowledgeAction};
+#[cfg(feature = "mock")]
+pub use self::elders_info::quorum_count;
 pub use self::{
-    elders_info::{quorum_count, EldersInfo},
-    member_info::{AgeCounter, MemberInfo, MemberState, MIN_AGE, MIN_AGE_COUNTER},
+    elders_info::EldersInfo,
+    member_info::{MemberInfo, MemberState, MIN_AGE},
     network_stats::NetworkStats,
     section_keys::{SectionKeyShare, SectionKeysProvider},
     section_map::{NeighbourEldersRemoved, SectionMap},
     section_members::SectionMembers,
     section_proof_chain::{ExtendError, SectionProofChain, TrustStatus},
-    section_update_barrier::{SectionUpdateBarrier, SectionUpdateDetails},
+};
+pub(crate) use self::{
+    section_update_barrier::SectionUpdateBarrier,
+    shared_state::{SharedState, UpdateSectionKnowledgeAction},
 };

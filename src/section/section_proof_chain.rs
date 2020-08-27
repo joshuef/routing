@@ -9,7 +9,7 @@
 use err_derive::Error;
 use std::{
     collections::HashSet,
-    iter,
+    iter, mem,
     ops::{Bound, RangeBounds},
 };
 
@@ -32,28 +32,30 @@ impl SectionProofChain {
     }
 
     /// Pushes a new key into the chain but only if the signature is valid.
-    pub(crate) fn push(&mut self, key: bls::PublicKey, signature: bls::Signature) {
+    /// Returns whether the chain changed.
+    pub(crate) fn push(&mut self, key: bls::PublicKey, signature: bls::Signature) -> bool {
         if self.has_key(&key) {
             trace!("already has key {:?}", key);
-            return;
+            return false;
         }
         let valid = bincode::serialize(&key)
             .map(|bytes| self.last_key().verify(&signature, &bytes))
             .unwrap_or(false);
 
         if valid {
-            self.tail.push(Block { key, signature })
+            self.tail.push(Block { key, signature });
+            true
         } else {
-            log_or_panic!(
-                log::Level::Error,
+            error!(
                 "invalid SectionProofChain block signature (last key: {:?})",
                 self.last_key()
-            )
+            );
+            false
         }
     }
 
     /// Pushed a new key into the chain without validating the signature. For testing only.
-    #[cfg(any(test, feature = "mock_base"))]
+    #[cfg(any(test, feature = "mock"))]
     pub fn push_without_validation(&mut self, key: bls::PublicKey, signature: bls::Signature) {
         self.tail.push(Block { key, signature })
     }
@@ -71,7 +73,7 @@ impl SectionProofChain {
             .unwrap_or(&self.head)
     }
 
-    /// Returns all the keys from the chain as a DoubleEndedIterator.
+    /// Returns all the keys of the chain as a DoubleEndedIterator.
     pub fn keys(&self) -> impl DoubleEndedIterator<Item = &bls::PublicKey> {
         iter::once(&self.head).chain(self.tail.iter().map(|block| &block.key))
     }
@@ -82,7 +84,7 @@ impl SectionProofChain {
     }
 
     /// Returns the index of the key in the chain or `None` if not present in the chain.
-    #[cfg_attr(feature = "mock_base", allow(clippy::trivially_copy_pass_by_ref))]
+    #[cfg_attr(feature = "mock", allow(clippy::trivially_copy_pass_by_ref))]
     pub fn index_of(&self, key: &bls::PublicKey) -> Option<u64> {
         self.keys()
             .position(|existing_key| existing_key == key)
@@ -197,6 +199,65 @@ impl SectionProofChain {
         Ok(())
     }
 
+    pub(crate) fn merge(&mut self, other: Self) -> Result<(), MergeError> {
+        fn check_same_keys<'a>(
+            a: impl IntoIterator<Item = &'a bls::PublicKey>,
+            b: impl IntoIterator<Item = &'a bls::PublicKey>,
+        ) -> Result<(), MergeError> {
+            if a.into_iter().zip(b).all(|(a, b)| a == b) {
+                Ok(())
+            } else {
+                Err(MergeError)
+            }
+        }
+
+        if let Some(first) = self.index_of(other.first_key()) {
+            check_same_keys(self.keys().skip(first as usize + 1), other.keys().skip(1))?;
+
+            if self.has_key(other.last_key()) {
+                // self:   [a b c]
+                // other:    [b]
+                // result: [a b c]
+                Ok(())
+            } else {
+                // self:   [a b c]
+                // other:    [b c d]
+                // result: [a b c d]
+                self.tail = mem::take(&mut self.tail)
+                    .into_iter()
+                    .take(first as usize)
+                    .chain(other.tail)
+                    .collect();
+                Ok(())
+            }
+        } else if let Some(first) = other.index_of(self.first_key()) {
+            check_same_keys(self.keys().skip(1), other.keys().skip(first as usize + 1))?;
+
+            if other.has_key(self.last_key()) {
+                // self:     [b]
+                // other:  [a b c]
+                // result: [a b c]
+                self.head = other.head;
+                self.tail = other.tail;
+                Ok(())
+            } else {
+                // self:     [b c d]
+                // other:  [a b c]
+                // result: [a b c d]
+                self.head = other.head;
+                self.tail = other
+                    .tail
+                    .into_iter()
+                    .take(first as usize)
+                    .chain(mem::take(&mut self.tail))
+                    .collect();
+                Ok(())
+            }
+        } else {
+            Err(MergeError)
+        }
+    }
+
     // Returns the latest key in this chain that is among the trusted keys, together with its index.
     fn latest_trusted_key<'a, 'b, I>(
         &'a self,
@@ -239,6 +300,11 @@ pub enum ExtendError {
     AlreadySufficient,
 }
 
+/// Error returned from `SectionProofChain::merge`
+#[derive(Debug, Error, Eq, PartialEq)]
+#[error(display = "incompatible chains cannot be merged")]
+pub struct MergeError;
+
 // Block of the section proof chain. Contains the section BLS public key and is signed by the
 // previous block. Note that the first key in the chain is not signed and so is not stored in
 // `Block`.
@@ -249,7 +315,7 @@ struct Block {
 }
 
 impl Block {
-    #[cfg_attr(feature = "mock_base", allow(clippy::trivially_copy_pass_by_ref))]
+    #[cfg_attr(feature = "mock", allow(clippy::trivially_copy_pass_by_ref))]
     fn verify(&self, public_key: &bls::PublicKey) -> bool {
         bincode::serialize(&self.key)
             .map(|bytes| public_key.verify(&self.signature, &bytes))
@@ -264,11 +330,12 @@ mod tests {
         consensus,
         rng::{self, MainRng},
     };
+    use std::{iter, ops::Range};
 
     #[test]
     fn check_trust_trusted() {
         let mut rng = rng::new();
-        let chain = gen_chain(&mut rng, 4);
+        let (chain, _) = gen_chain(&mut rng, 4);
 
         // If any key in the chain is already trusted, the whole chain is trusted.
         for key in chain.keys() {
@@ -279,7 +346,7 @@ mod tests {
     #[test]
     fn check_trust_invalid() {
         let mut rng = rng::new();
-        let mut chain = gen_chain(&mut rng, 2);
+        let (mut chain, _) = gen_chain(&mut rng, 2);
 
         // Add a block with invalid signature to the chain.
         let (_, invalid_secret_key) = gen_keys(&mut rng);
@@ -288,7 +355,7 @@ mod tests {
 
         // Add another block with valid signature by the previous block.
         let (key, signature, _) = gen_block(&mut rng, &secret_key);
-        chain.push(key, signature);
+        let _ = chain.push(key, signature);
 
         // If we only trust the keys up to, but excluding the invalid block, the trust check fails
         // because the rest of the chain contains invalid block.
@@ -306,7 +373,7 @@ mod tests {
     #[test]
     fn check_trust_unknown() {
         let mut rng = rng::new();
-        let chain = gen_chain(&mut rng, 2);
+        let (chain, _) = gen_chain(&mut rng, 2);
 
         // None of the keys in the chain is trusted - the chain might be valid, but its trust status
         // cannot be determined.
@@ -324,7 +391,7 @@ mod tests {
     #[allow(clippy::reversed_empty_ranges)]
     fn slice() {
         let mut rng = rng::new();
-        let chain = gen_chain(&mut rng, 3);
+        let (chain, _) = gen_chain(&mut rng, 3);
         let keys: Vec<_> = chain.keys().collect();
 
         let assert_keys_eq = |chain: SectionProofChain, expected: &[_]| {
@@ -362,6 +429,133 @@ mod tests {
         assert_keys_eq(chain.slice(0..=3), &keys[0..3]);
     }
 
+    #[test]
+    fn merge() {
+        let mut rng = rng::new();
+        let (chain, _) = gen_chain(&mut rng, 4);
+
+        let check = |a: Range<u64>, b: Range<u64>, expected: Result<Range<u64>, MergeError>| {
+            let mut a = chain.slice(a);
+            let b = chain.slice(b);
+            let result = a.merge(b);
+
+            match expected {
+                Ok(range) => {
+                    assert_eq!(result, Ok(()));
+                    assert_eq!(a, chain.slice(range));
+                }
+                Err(error) => assert_eq!(result, Err(error)),
+            }
+        };
+
+        // A: [a]
+        // B: [a]
+        // R: [a]
+        check(0..1, 0..1, Ok(0..1));
+
+        // A: [a]
+        // B: [a b]
+        // R: [a b]
+        check(0..1, 0..2, Ok(0..2));
+
+        // A: [a b]
+        // B: [a]
+        // R: [a b]
+        check(0..2, 0..1, Ok(0..2));
+
+        // A:   [b]
+        // B: [a b]
+        // R: [a b]
+        check(1..2, 0..2, Ok(0..2));
+
+        // A: [a b]
+        // B:   [b]
+        // R: [a b]
+        check(0..2, 1..2, Ok(0..2));
+
+        // A: [a b]
+        // B: [a b]
+        // R: [a b]
+        check(0..2, 0..2, Ok(0..2));
+
+        // A: [a b]
+        // B:   [b c]
+        // R: [a b c]
+        check(0..2, 1..3, Ok(0..3));
+
+        // A:   [b c]
+        // B: [a b]
+        // R: [a b c]
+        check(1..3, 0..2, Ok(0..3));
+
+        // A: [a b c]
+        // B:   [b]
+        // R: [a b c]
+        check(0..3, 1..2, Ok(0..3));
+
+        // A:   [b]
+        // B: [a b c]
+        // R: [a b c]
+        check(1..2, 0..3, Ok(0..3));
+
+        // A: [a]
+        // B:   [b]
+        // R: Err
+        check(0..1, 1..2, Err(MergeError));
+
+        // A: [b]
+        // B:   [a]
+        // R: Err
+        check(1..2, 0..1, Err(MergeError));
+    }
+
+    #[test]
+    fn merge_fork() {
+        // A: [a b c d]
+        // B: [a b c x]
+        // R: Err
+
+        let mut rng = rng::new();
+
+        let (mut chain0, sk) = gen_chain(&mut rng, 3);
+        let mut chain1 = chain0.clone();
+
+        let (c0b0_pk, c0b0_signature, _) = gen_block(&mut rng, &sk);
+        let _ = chain0.push(c0b0_pk, c0b0_signature);
+
+        let (c1b0_pk, c1b0_signature, _) = gen_block(&mut rng, &sk);
+        let _ = chain1.push(c1b0_pk, c1b0_signature);
+
+        assert_eq!(chain0.merge(chain1), Err(MergeError));
+    }
+
+    #[test]
+    fn merge_fork_join() {
+        // A: [a b c d e]
+        // B: [a b c x e]
+        // R: Err
+
+        let mut rng = rng::new();
+
+        let (mut chain0, sk) = gen_chain(&mut rng, 3);
+        let mut chain1 = chain0.clone();
+
+        let (c0b0_pk, c0b0_signature, c0b0_sk) = gen_block(&mut rng, &sk);
+        let _ = chain0.push(c0b0_pk, c0b0_signature);
+
+        let (c1b0_pk, c1b0_signature, c1b0_sk) = gen_block(&mut rng, &sk);
+        let _ = chain1.push(c1b0_pk, c1b0_signature);
+
+        let (b1_pk, _) = gen_keys(&mut rng);
+        let c0b1_signature = c0b0_sk.sign(&bincode::serialize(&b1_pk).unwrap());
+        let _ = chain0.push(b1_pk, c0b1_signature);
+
+        let c1b1_signature = c1b0_sk.sign(&bincode::serialize(&b1_pk).unwrap());
+        let _ = chain1.push(b1_pk, c1b1_signature);
+
+        assert_eq!(chain0.merge(chain1), Err(MergeError));
+    }
+
     fn gen_keys(rng: &mut MainRng) -> (bls::PublicKey, bls::SecretKey) {
         let secret_key = consensus::test_utils::gen_secret_key(rng);
         (secret_key.public_key(), secret_key)
@@ -377,17 +571,17 @@ mod tests {
         (public_key, signature, secret_key)
     }
 
-    fn gen_chain(rng: &mut MainRng, len: usize) -> SectionProofChain {
+    fn gen_chain(rng: &mut MainRng, len: usize) -> (SectionProofChain, bls::SecretKey) {
         let (key, mut current_secret_key) = gen_keys(rng);
         let mut chain = SectionProofChain::new(key);
 
         for _ in 1..len {
             let (new_public_key, new_signature, new_secret_key) =
                 gen_block(rng, &current_secret_key);
-            chain.push(new_public_key, new_signature);
+            let _ = chain.push(new_public_key, new_signature);
             current_secret_key = new_secret_key;
         }
 
-        chain
+        (chain, current_secret_key)
     }
 }

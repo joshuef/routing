@@ -9,7 +9,7 @@
 //! Relocation related types and utilities.
 
 use crate::{
-    crypto::{self, signing::Signature},
+    crypto::{self, Signature},
     error::RoutingError,
     id::{FullId, PublicId},
     messages::{Message, Variant},
@@ -17,10 +17,48 @@ use crate::{
 
 use bincode::serialize;
 use serde::{de::Error as SerdeDeError, Deserialize, Deserializer, Serialize, Serializer};
-use xor_name::{Prefix, XorName, XOR_NAME_LEN};
+use xor_name::XorName;
 
-#[cfg(feature = "mock_base")]
-pub use self::overrides::Overrides;
+/// Relocation check - returns whether a member with the given age is a candidate for relocation on
+/// a churn event with the given signature.
+pub fn check(age: u8, churn_signature: &bls::Signature) -> bool {
+    // Evaluate the formula: `signature % 2^age == 0` Which is the same as checking the signature
+    // has at least `age` trailing zero bits.
+    trailing_zeros(&churn_signature.to_bytes()[..]) >= age as u32
+}
+
+// Returns the number of trailing zero bits of the byte slice.
+fn trailing_zeros(bytes: &[u8]) -> u32 {
+    let mut output = 0;
+
+    for &byte in bytes.iter().rev() {
+        if byte == 0 {
+            output += 8;
+        } else {
+            output += byte.trailing_zeros();
+            break;
+        }
+    }
+
+    output
+}
+
+/// Compute the destination for the node with `relocating_name` to be relocated to. `churn_name` is
+/// the name of the joined/left node that triggered the relocation.
+pub fn compute_destination(relocating_name: &XorName, churn_name: &XorName) -> XorName {
+    let combined_name = xor(relocating_name, churn_name);
+    XorName(crypto::sha3_256(&combined_name.0))
+}
+
+// TODO: move this to the xor-name crate as `BitXor` impl.
+fn xor(lhs: &XorName, rhs: &XorName) -> XorName {
+    let mut output = XorName::default();
+    for (o, (l, r)) in output.0.iter_mut().zip(lhs.0.iter().zip(rhs.0.iter())) {
+        *o = l ^ r;
+    }
+
+    output
+}
 
 /// Details of a relocation: which node to relocate, where to relocate it to and what age it should
 /// get once relocated.
@@ -53,6 +91,8 @@ impl SignedRelocateDetails {
         }
     }
 
+    // FIXME: need a non-panicking version of this, because when we receive it from another node,
+    // we can't be sure it's well formed.
     pub fn relocate_details(&self) -> &RelocateDetails {
         if let Variant::Relocate(details) = &self.signed_msg.variant() {
             details
@@ -128,196 +168,42 @@ impl RelocatePayload {
     }
 }
 
-#[cfg(not(feature = "mock_base"))]
-pub fn compute_destination(
-    _src_prefix: &Prefix,
-    relocated_name: &XorName,
-    trigger_name: &XorName,
-) -> XorName {
-    compute_destination_without_override(relocated_name, trigger_name)
+#[derive(Copy, Clone, Eq, PartialEq, Hash, Debug, Serialize, Deserialize)]
+pub struct RelocatePromise {
+    pub name: XorName,
+    pub destination: XorName,
 }
 
-#[cfg(feature = "mock_base")]
-pub fn compute_destination(
-    src_prefix: &Prefix,
-    relocated_name: &XorName,
-    trigger_name: &XorName,
-) -> XorName {
-    self::overrides::get(
-        src_prefix,
-        compute_destination_without_override(relocated_name, trigger_name),
-    )
+/// Action to relocate a node.
+pub(crate) enum RelocateAction {
+    /// Relocate the node instantly.
+    Instant(RelocateDetails),
+    /// Relocate the node after they are no longer our elder.
+    Delayed(RelocatePromise),
 }
 
-fn compute_destination_without_override(
-    relocated_name: &XorName,
-    trigger_name: &XorName,
-) -> XorName {
-    let mut buffer = [0; 2 * XOR_NAME_LEN];
-    buffer[..XOR_NAME_LEN].copy_from_slice(&relocated_name.0);
-    buffer[XOR_NAME_LEN..].copy_from_slice(&trigger_name.0);
-
-    XorName(crypto::sha3_256(&buffer))
+impl RelocateAction {
+    pub fn destination(&self) -> &XorName {
+        match self {
+            Self::Instant(details) => &details.destination,
+            Self::Delayed(promise) => &promise.destination,
+        }
+    }
 }
 
-#[cfg(feature = "mock_base")]
-mod overrides {
-    use crate::{Prefix, XorName};
-    use std::{
-        cell::RefCell,
-        collections::{hash_map::Entry, HashMap, HashSet},
-    };
+#[cfg(test)]
+mod tests {
+    use super::*;
 
-    /// Mechanism for overriding relocation destinations. Useful for tests.
-    pub struct Overrides {
-        prefixes: HashSet<Prefix>,
-    }
-
-    impl Overrides {
-        /// Create new instance of relocation overrides.
-        /// The overrides set by this instance are automatically `clear`ed when this instance goes
-        /// out of scope.
-        pub fn new() -> Self {
-            Self {
-                prefixes: HashSet::new(),
-            }
-        }
-
-        /// Override relocation destination for the given source prefix - that is, any node to be
-        /// relocated from that prefix will be relocated to the given destination.
-        /// The override applies only to the exact prefix, not to its parents / children.
-        pub fn set(&mut self, src_prefix: Prefix, dst: XorName) {
-            let _ = self.prefixes.insert(src_prefix);
-
-            OVERRIDES.with(|map| {
-                map.borrow_mut().entry(src_prefix).or_default().next = Some(dst);
-            })
-        }
-
-        /// Suppress relocations from the given source prefix.
-        pub fn suppress(&mut self, src_prefix: Prefix) {
-            self.set(src_prefix, src_prefix.name())
-        }
-
-        /// Suppress relocations from the given source prefix and its parent prefixes.
-        pub fn suppress_self_and_parents(&mut self, mut src_prefix: Prefix) {
-            self.suppress(src_prefix);
-
-            while !src_prefix.is_empty() {
-                src_prefix = src_prefix.popped();
-                self.suppress(src_prefix);
-            }
-        }
-
-        /// Clear all relocation overrides set by this instance.
-        pub fn clear(&mut self) {
-            OVERRIDES.with(|map| {
-                let mut map = map.borrow_mut();
-
-                for prefix in self.prefixes.drain() {
-                    if let Some(info) = map.get_mut(&prefix) {
-                        info.next = None;
-                    }
-                }
-            });
-        }
-    }
-
-    impl Default for Overrides {
-        fn default() -> Self {
-            Self::new()
-        }
-    }
-
-    impl Drop for Overrides {
-        fn drop(&mut self) {
-            self.clear();
-        }
-    }
-
-    #[derive(Default)]
-    struct OverrideInfo {
-        // If `Some`, the relocation destinations are overridden with this name, otherwise they are
-        // not.
-        next: Option<XorName>,
-        // Map of original relocation destinations to the overridden ones. As this map is shared
-        // among all nodes in the network, this assures that every node will pick the same
-        // destination name for a given relocated node no matter when the calculation is performed.
-        used: HashMap<XorName, XorName>,
-    }
-
-    impl OverrideInfo {
-        fn get(&mut self, original_dst: XorName) -> XorName {
-            match self.used.entry(original_dst) {
-                Entry::Vacant(entry) => {
-                    if let Some(next) = self.next {
-                        *entry.insert(next)
-                    } else {
-                        original_dst
-                    }
-                }
-                Entry::Occupied(entry) => *entry.get(),
-            }
-        }
-    }
-
-    pub(super) fn get(src_prefix: &Prefix, original_dst: XorName) -> XorName {
-        OVERRIDES.with(|map| {
-            if let Some(info) = map.borrow_mut().get_mut(src_prefix) {
-                info.get(original_dst)
-            } else {
-                original_dst
-            }
-        })
-    }
-
-    thread_local! {
-        static OVERRIDES: RefCell<HashMap<Prefix, OverrideInfo>> = RefCell::new(HashMap::new());
-    }
-
-    #[cfg(test)]
-    mod tests {
-        use super::*;
-        use crate::rng;
-        use rand::Rng;
-
-        #[test]
-        fn multiple_instances() {
-            let mut rng = rng::new();
-
-            let p0 = Prefix::default().pushed(false);
-            let p1 = Prefix::default().pushed(true);
-
-            let a_orig: XorName = rng.gen();
-            let b_orig: XorName = rng.gen();
-            let a_overriden0: XorName = rng.gen();
-            let a_overriden1: XorName = rng.gen();
-
-            assert_eq!(get(&p0, a_orig), a_orig);
-            assert_eq!(get(&p1, a_orig), a_orig);
-
-            {
-                let mut overrides = Overrides::new();
-                overrides.set(p0, a_overriden0);
-                assert_eq!(get(&p0, a_orig), a_overriden0);
-                assert_eq!(get(&p1, a_orig), a_orig);
-
-                {
-                    let mut overrides = Overrides::new();
-                    overrides.set(p1, a_overriden1);
-                    assert_eq!(get(&p0, a_orig), a_overriden0);
-                    assert_eq!(get(&p1, a_orig), a_overriden1);
-                }
-
-                assert_eq!(get(&p0, a_orig), a_overriden0);
-                assert_eq!(get(&p1, a_orig), a_overriden1);
-                assert_eq!(get(&p1, b_orig), b_orig);
-            }
-
-            assert_eq!(get(&p0, a_orig), a_overriden0);
-            assert_eq!(get(&p1, a_orig), a_overriden1);
-            assert_eq!(get(&p0, b_orig), b_orig);
-            assert_eq!(get(&p1, b_orig), b_orig);
-        }
+    #[test]
+    fn byte_slice_trailing_zeros() {
+        assert_eq!(trailing_zeros(&[0]), 8);
+        assert_eq!(trailing_zeros(&[1]), 0);
+        assert_eq!(trailing_zeros(&[2]), 1);
+        assert_eq!(trailing_zeros(&[4]), 2);
+        assert_eq!(trailing_zeros(&[8]), 3);
+        assert_eq!(trailing_zeros(&[0, 0]), 16);
+        assert_eq!(trailing_zeros(&[1, 0]), 8);
+        assert_eq!(trailing_zeros(&[2, 0]), 9);
     }
 }

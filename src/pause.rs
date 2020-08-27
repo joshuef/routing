@@ -7,7 +7,7 @@
 // permissions and limitations relating to use of the SAFE Network Software.
 
 use crate::{
-    consensus::{ConsensusEngine, VoteAccumulator},
+    consensus::VoteAccumulator,
     id::FullId,
     message_filter::MessageFilter,
     messages::{MessageAccumulator, QueuedMessage},
@@ -16,6 +16,7 @@ use crate::{
     transport::Transport,
     TransportEvent,
 };
+use bytes::Bytes;
 use crossbeam_channel as mpmc;
 use std::collections::VecDeque;
 
@@ -29,7 +30,6 @@ use std::collections::VecDeque;
 // version >= X.
 pub struct PausedState {
     pub(super) network_params: NetworkParams,
-    pub(super) consensus_engine: ConsensusEngine,
     pub(super) shared_state: SharedState,
     pub(super) section_keys_provider: SectionKeysProvider,
     pub(super) full_id: FullId,
@@ -41,4 +41,5 @@ pub struct PausedState {
     pub(super) msg_accumulator: MessageAccumulator,
     pub(super) vote_accumulator: VoteAccumulator,
     pub(super) section_update_barrier: SectionUpdateBarrier,
+    pub(super) relocate_promise: Option<Bytes>,
 }

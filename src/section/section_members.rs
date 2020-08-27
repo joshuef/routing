@@ -11,7 +11,10 @@ use super::{
     section_proof_chain::SectionProofChain,
     EldersInfo,
 };
-use crate::{consensus::Proof, id::P2pNode};
+use crate::{
+    consensus::{Proof, Proven},
+    id::P2pNode,
+};
 
 use itertools::Itertools;
 use std::{
@@ -25,18 +28,20 @@ use xor_name::{Prefix, XorName};
 /// Container for storing information about members of our section.
 #[derive(Clone, Default, Debug, Eq, Serialize, Deserialize)]
 pub struct SectionMembers {
-    members: BTreeMap<XorName, MemberInfo>,
-    // Members of our sibling section immediately after the last split.
-    // Note: this field is not part of the shared state.
-    #[serde(skip)]
-    post_split_siblings: BTreeMap<XorName, MemberInfo>,
+    members: BTreeMap<XorName, Proven<MemberInfo>>,
 }
 
 impl SectionMembers {
+    /// Returns an iterator over all current (joined) and past (left) members.
+    pub fn all(&self) -> impl Iterator<Item = &MemberInfo> {
+        self.members.values().map(|info| &info.value)
+    }
+
     /// Returns an iterator over the members that are not in the `Left` state.
     pub fn active(&self) -> impl Iterator<Item = &MemberInfo> {
         self.members
             .values()
+            .map(|info| &info.value)
             .filter(|member| member.state != MemberState::Left)
     }
 
@@ -44,34 +49,27 @@ impl SectionMembers {
     pub fn joined(&self) -> impl Iterator<Item = &MemberInfo> {
         self.members
             .values()
+            .map(|info| &info.value)
             .filter(|member| member.state == MemberState::Joined)
     }
 
-    /// Returns mutable iterator over the members that have state == `Joined`.
-    pub fn joined_mut(&mut self) -> impl Iterator<Item = &mut MemberInfo> {
+    /// Returns an iterator over the members that have state == `Joined` together with their proofs.
+    pub fn joined_proven(&self) -> impl Iterator<Item = &Proven<MemberInfo>> {
         self.members
-            .values_mut()
-            .filter(|member| member.state == MemberState::Joined)
+            .values()
+            .filter(|member| member.value.state == MemberState::Joined)
     }
 
     /// Returns nodes from our section with age greater than `MIN_AGE`
-    pub fn mature(&self) -> impl Iterator<Item = &P2pNode> {
+    pub fn adults(&self) -> impl Iterator<Item = &P2pNode> {
         self.joined()
-            .filter(|info| info.is_mature())
+            .filter(|info| info.is_adult())
             .map(|info| &info.p2p_node)
     }
 
     /// Get info for the member with the given name.
     pub fn get(&self, name: &XorName) -> Option<&MemberInfo> {
-        self.members.get(name)
-    }
-
-    /// Returns a section member `P2pNode`
-    pub fn get_p2p_node(&self, name: &XorName) -> Option<&P2pNode> {
-        self.members
-            .get(name)
-            .or_else(|| self.post_split_siblings.get(name))
-            .map(|info| &info.p2p_node)
+        self.members.get(name).map(|info| &info.value)
     }
 
     /// Returns the candidates for elders out of all the nodes in this section.
@@ -80,7 +78,13 @@ impl SectionMembers {
         elder_size: usize,
         current_elders: &EldersInfo,
     ) -> BTreeMap<XorName, P2pNode> {
-        elder_candidates(elder_size, current_elders, self.joined())
+        elder_candidates(
+            elder_size,
+            current_elders,
+            self.members
+                .values()
+                .filter(|info| info.value.state == MemberState::Joined),
+        )
     }
 
     /// Returns the candidates for elders out of all nodes matching the prefix.
@@ -93,107 +97,83 @@ impl SectionMembers {
         elder_candidates(
             elder_size,
             current_elders,
-            self.joined()
-                .filter(|info| prefix.matches(info.p2p_node.name())),
+            self.members.values().filter(|info| {
+                info.value.state == MemberState::Joined
+                    && prefix.matches(info.value.p2p_node.name())
+            }),
         )
     }
 
-    /// Check if the given `XorName` is an active member of our section.
-    pub fn contains(&self, name: &XorName) -> bool {
+    /// Check if the given `XorName` is or was a member of our section.
+    // pub fn contains(&self, name: &XorName) -> bool {
+    //     self.members.contains_key(name)
+    // }
+
+    /// Returns whether the given peer is a joined member of our section.
+    pub fn is_joined(&self, name: &XorName) -> bool {
         self.members
             .get(name)
-            .map(|info| info.state != MemberState::Left)
+            .map(|info| info.value.state == MemberState::Joined)
             .unwrap_or(false)
     }
 
-    /// Returns whether the given peer is an active (not left) member of our section.
-    pub fn is_active(&self, name: &XorName) -> bool {
+    /// Returns whether the given peer has age > MIN_AGE.
+    pub fn is_adult(&self, name: &XorName) -> bool {
         self.members
             .get(name)
-            .map(|info| info.state != MemberState::Left)
+            .map(|info| info.value.is_adult())
             .unwrap_or(false)
     }
 
-    /// Returns whether the given peer is mature (adult or elder)
-    pub fn is_mature(&self, name: &XorName) -> bool {
-        self.members
-            .get(name)
-            .map(|info| info.is_mature())
-            .unwrap_or(false)
-    }
-
-    /// Adds a member to our section.
-    pub fn add(&mut self, p2p_node: P2pNode, age: u8, proof: Proof) {
-        match self.members.entry(*p2p_node.name()) {
-            Entry::Occupied(mut entry) => {
-                if entry.get().state == MemberState::Left {
-                    // Node rejoining
-                    // TODO: To properly support rejoining, either keep the previous age or set the
-                    // new age to max(old_age, new_age)
-                    let info = entry.get_mut();
-                    info.state = MemberState::Joined;
-                    info.set_age(age);
-                    info.proof = proof;
+    /// Update a member of our section.
+    /// Returns whether anything actually changed.
+    pub fn update(
+        &mut self,
+        new_info: MemberInfo,
+        proof: Proof,
+        section_chain: &SectionProofChain,
+    ) -> bool {
+        match self.members.entry(*new_info.p2p_node.name()) {
+            Entry::Vacant(entry) => {
+                let new_info = Proven::new(new_info, proof);
+                if new_info.verify(section_chain) {
+                    let _ = entry.insert(new_info);
+                    true
                 } else {
-                    // Node already joined - this should not happen.
-                    log_or_panic!(
-                        log::Level::Error,
-                        "Adding member that already exists: {}",
-                        p2p_node,
-                    );
+                    false
                 }
             }
-            Entry::Vacant(entry) => {
-                // Node joining for the first time.
-                let _ = entry.insert(MemberInfo::new(age, p2p_node.clone(), proof));
+            Entry::Occupied(mut entry) if entry.get().value.state == MemberState::Joined => {
+                // To maintain commutativity, only allow the age to increase.
+                if new_info.state == MemberState::Joined && new_info.age <= entry.get().value.age {
+                    return false;
+                }
+
+                let new_info = Proven::new(new_info, proof);
+                if new_info.verify(section_chain) {
+                    let _ = entry.insert(new_info);
+                    true
+                } else {
+                    false
+                }
             }
+            Entry::Occupied(_) => false,
         }
     }
 
-    /// Remove a member from our section. Returns the removed `MemberInfo` or `None` if there was
-    /// no such member.
-    pub fn remove(&mut self, name: &XorName, proof: Proof) -> Option<MemberInfo> {
-        if let Some(info) = self
-            .members
-            .get_mut(name)
-            // TODO: Probably should actually remove them
-            .filter(|info| info.state != MemberState::Left)
-        {
-            let output = info.clone();
-            info.state = MemberState::Left;
-            info.proof = proof;
-            Some(output)
-        } else {
-            // FIXME: we should still insert it in the `Left` state
-            log_or_panic!(
-                log::Level::Error,
-                "Removing member that doesn't exist: {}",
-                name
-            );
-
-            None
-        }
-    }
-
-    /// Remove all members whose name does not match our prefix and assigns them to
-    /// `post_split_siblings`.
+    /// Remove all members whose name does not match our prefix.
     pub fn remove_not_matching_our_prefix(&mut self, prefix: &Prefix) {
-        let (members, siblings) = mem::take(&mut self.members)
+        self.members = mem::take(&mut self.members)
             .into_iter()
-            .partition(|(name, _)| prefix.matches(name));
-        self.members = members;
-        self.post_split_siblings = siblings;
+            .filter(|(name, _)| prefix.matches(name))
+            .collect();
     }
 
-    /// Iterate through member infos to ensure they are section approved.
-    pub fn verify(&self, history: &SectionProofChain) -> bool {
-        self.members
-            .values()
-            .all(|member_info| member_info.verify(history))
-            && self
-                .post_split_siblings
-                .values()
-                .all(|member_info| member_info.verify(history))
+    /// Merge two `SectionMembers` into one.
+    pub fn merge(&mut self, other: Self, section_chain: &SectionProofChain) {
+        for (_, info) in other.members {
+            let _ = self.update(info.value, info.proof, section_chain);
+        }
     }
 }
 
@@ -216,12 +196,12 @@ fn elder_candidates<'a, I>(
     members: I,
 ) -> BTreeMap<XorName, P2pNode>
 where
-    I: IntoIterator<Item = &'a MemberInfo>,
+    I: IntoIterator<Item = &'a Proven<MemberInfo>>,
 {
     members
         .into_iter()
         .sorted_by(|lhs, rhs| cmp_elder_candidates(lhs, rhs, current_elders))
-        .map(|info| (*info.p2p_node.name(), info.p2p_node.clone()))
+        .map(|info| (*info.value.p2p_node.name(), info.value.p2p_node.clone()))
         .take(elder_size)
         .collect()
 }
@@ -229,18 +209,23 @@ where
 // Compare candidates for the next elders. The one comparing `Less` is more likely to become
 // elder.
 fn cmp_elder_candidates(
-    lhs: &MemberInfo,
-    rhs: &MemberInfo,
+    lhs: &Proven<MemberInfo>,
+    rhs: &Proven<MemberInfo>,
     current_elders: &EldersInfo,
 ) -> Ordering {
     // Older nodes are preferred. In case of a tie, prefer current elders. If still a tie, break
     // it comparing by the proof signatures because it's impossible for a node to predict its
     // signature and therefore game its chances of promotion.
-    rhs.age_counter
-        .cmp(&lhs.age_counter)
+    rhs.value
+        .age
+        .cmp(&lhs.value.age)
         .then_with(|| {
-            let lhs_is_elder = current_elders.elders.contains_key(lhs.p2p_node.name());
-            let rhs_is_elder = current_elders.elders.contains_key(rhs.p2p_node.name());
+            let lhs_is_elder = current_elders
+                .elders
+                .contains_key(lhs.value.p2p_node.name());
+            let rhs_is_elder = current_elders
+                .elders
+                .contains_key(rhs.value.p2p_node.name());
 
             match (lhs_is_elder, rhs_is_elder) {
                 (true, false) => Ordering::Less,
