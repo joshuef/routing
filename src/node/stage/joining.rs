@@ -69,6 +69,66 @@ impl Joining {
         Ok(stage)
     }
 
+    pub async fn process_message(
+        &mut self,
+        sender: SocketAddr,
+        msg: Message,
+    ) -> Result<(Option<Approved>, Option<Event>)> {
+        trace!("Got {:?}", msg);
+        match self.decide_message_status(&msg)? {
+            MessageStatus::Useful => match msg.variant() {
+                Variant::BootstrapResponse(BootstrapResponse::Join {
+                    elders_info,
+                    section_key,
+                }) => {
+                    self.handle_bootstrap_response(
+                        msg.src().to_sender_node(Some(sender))?,
+                        elders_info.clone(),
+                        *section_key,
+                    )
+                    .await?;
+
+                    Ok((None, None))
+                }
+                Variant::NodeApproval(payload) => {
+                    let connect_type = self.connect_type();
+                    let section_key = *msg.proof_chain_last_key()?;
+
+                    // Transition from Joining to Approved
+                    info!(
+                        "This node has been approved to join the network at {:?}!",
+                        payload.elders_info.value.prefix,
+                    );
+
+                    let shared_state = SharedState::new(section_key, payload.elders_info.clone());
+
+                    let new_stage = Approved::new(
+                        self.comm.clone(),
+                        shared_state,
+                        payload.parsec_version,
+                        None,
+                        self.full_id.clone(),
+                        self.network_params,
+                        self.rng,
+                    )?;
+                    let event_to_relay = Event::Connected(connect_type);
+
+                    Ok((Some(new_stage), Some(event_to_relay)))
+                }
+                _ => unreachable!(),
+            },
+            MessageStatus::Untrusted => unreachable!(),
+            MessageStatus::Unknown => {
+                debug!("Unknown message from {}: {:?} ", sender, msg);
+                Ok((None, None))
+            }
+            MessageStatus::Useless => {
+                debug!("Useless message from {}: {:?}", sender, msg);
+                Ok((None, None))
+            }
+        }
+    }
+
     /*pub async fn handle_timeout(&mut self, comm: &mut Comm, token: u64) -> Result<()> {
         if token == self.timer_token {
             debug!("Timeout when trying to join a section");
@@ -119,66 +179,6 @@ impl Joining {
             | Variant::ParsecResponse(..)
             | Variant::NotifyLagging { .. }
             | Variant::Ping => Ok(MessageStatus::Useless),
-        }
-    }
-
-    pub async fn process_message(
-        &mut self,
-        sender: SocketAddr,
-        msg: Message,
-    ) -> Result<Option<Approved>> {
-        trace!("Got {:?}", msg);
-        match self.decide_message_status(&msg)? {
-            MessageStatus::Useful => match msg.variant() {
-                Variant::BootstrapResponse(BootstrapResponse::Join {
-                    elders_info,
-                    section_key,
-                }) => {
-                    self.handle_bootstrap_response(
-                        msg.src().to_sender_node(Some(sender))?,
-                        elders_info.clone(),
-                        *section_key,
-                    )
-                    .await?;
-
-                    Ok(None)
-                }
-                Variant::NodeApproval(payload) => {
-                    let connect_type = self.connect_type();
-                    let section_key = *msg.proof_chain_last_key()?;
-
-                    // Transition from Joining to Approved
-                    info!(
-                        "This node has been approved to join the network at {:?}!",
-                        payload.elders_info.value.prefix,
-                    );
-
-                    let shared_state = SharedState::new(section_key, payload.elders_info.clone());
-                    let stage = Approved::new(
-                        self.comm.clone(),
-                        shared_state,
-                        payload.parsec_version,
-                        None,
-                        self.full_id.clone(),
-                        self.network_params,
-                        self.rng,
-                    )?;
-
-                    self.comm.send_event(Event::Connected(connect_type));
-
-                    Ok(Some(stage))
-                }
-                _ => unreachable!(),
-            },
-            MessageStatus::Untrusted => unreachable!(),
-            MessageStatus::Unknown => {
-                debug!("Unknown message from {}: {:?} ", sender, msg);
-                Ok(None)
-            }
-            MessageStatus::Useless => {
-                debug!("Useless message from {}: {:?}", sender, msg);
-                Ok(None)
-            }
         }
     }
 
@@ -240,7 +240,7 @@ impl Joining {
                 relocate_payload: relocate_payload.cloned(),
             };
 
-            info!("JoinRequest Sending {:?} to {}", join_request, dst);
+            info!("Sending {:?} to {}", join_request, dst);
             let variant = Variant::JoinRequest(Box::new(join_request));
             self.comm
                 .send_direct_message(&self.full_id, dst.peer_addr(), variant)

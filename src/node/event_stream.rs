@@ -54,7 +54,13 @@ impl EventStream {
                 return relay_event;
             } else if let Some((src, message)) = msg {
                 // Process the message according to our stage
-                let _ = self.stage.lock().await.process_message(src, message).await;
+                let relay_event = self.stage.lock().await.process_message(src, message).await;
+
+                match relay_event {
+                    Ok(Some(new_event)) => return Some(new_event),
+                    Ok(None) => {}
+                    Err(err) => error!("Error encountered when processing message: {}", err),
+                }
             }
         }
         None

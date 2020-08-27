@@ -8,7 +8,6 @@
 
 use crate::{
     error::{Result, RoutingError},
-    event::Event,
     id::FullId,
     location::DstLocation,
     messages::{Message, Variant},
@@ -103,7 +102,6 @@ impl Comm {
         recipient: &SocketAddr,
         msg: Bytes,
     ) -> Result<()> {
-
         trace!("Sending message to target {:?}", recipient);
         // TODO: can we keep the Connections to nodes to make this more efficient??
         let conn = self.endpoint.connect_to(recipient).await?;
@@ -119,12 +117,6 @@ impl Comm {
         let message = Message::single_src(src_id, DstLocation::Direct, variant, None, None)?;
         self.send_message_to_target(recipient, message.to_bytes())
             .await
-    }
-
-    // TODO: this function needs to be removed since
-    // there shouldn't be a need to dispatch Events from here...
-    pub fn send_event(&self, _event: Event) {
-        // let _ = self.user_event_tx.send(event);
     }
 
     // Private helper to send a message using the given quic-p2p Connection

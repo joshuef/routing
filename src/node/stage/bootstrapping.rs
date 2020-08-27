@@ -133,7 +133,7 @@ impl Bootstrapping {
                 "Ignoring BootstrapResponse from unexpected peer: {}",
                 sender,
             );
-            //TODO?? core.transport.disconnect(*sender.peer_addr());
+            core.transport.disconnect(*sender.peer_addr());
             return Ok(None);
         }*/
 

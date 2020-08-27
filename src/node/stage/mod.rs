@@ -15,6 +15,7 @@ use crate::{
     comm::Comm,
     consensus::{self, Proof, Proven},
     error::{Result, RoutingError},
+    event::Event,
     id::{FullId, P2pNode},
     messages::{Message, Variant},
     network_params::NetworkParams,
@@ -163,21 +164,37 @@ impl Stage {
         }
     }
 
-    pub async fn process_message(&mut self, sender: SocketAddr, msg: Message) -> Result<()> {
+    /// Process a message accordng to ccurrent stage.
+    /// This function may return an Event that needs to be reported to the user.
+    pub async fn process_message(
+        &mut self,
+        sender: SocketAddr,
+        msg: Message,
+    ) -> Result<Option<Event>> {
         match &mut self.state {
             State::Bootstrapping(stage) => {
                 if let Some(joining) = stage.process_message(sender, msg).await? {
                     self.state = State::Joining(joining);
                 }
-                Ok(())
+
+                Ok(None)
             }
             State::Joining(stage) => {
-                if let Some(approved) = stage.process_message(sender, msg).await? {
+                let (new_state, event_to_relay) = stage.process_message(sender, msg).await?;
+                if let Some(approved) = new_state {
                     self.state = State::Approved(approved);
                 }
-                Ok(())
+
+                Ok(event_to_relay)
             }
-            State::Approved(stage) => stage.process_message(sender, msg).await,
+            State::Approved(stage) => {
+                let (new_state, event_to_relay) = stage.process_message(sender, msg).await?;
+                if let Some(bootstrapping) = new_state {
+                    self.state = State::Bootstrapping(bootstrapping);
+                }
+
+                Ok(event_to_relay)
+            }
             State::Terminated => Err(RoutingError::InvalidState),
         }
     }

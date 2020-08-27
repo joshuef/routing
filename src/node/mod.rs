@@ -25,7 +25,7 @@ use crate::{
     messages::Variant,
     network_params::NetworkParams,
     rng::{self, MainRng},
-    section::{SectionProofChain, SharedState},
+    section::SectionProofChain,
     TransportConfig,
 };
 use bytes::Bytes;
@@ -87,9 +87,6 @@ impl Node {
     ////////////////////////////////////////////////////////////////////////////
 
     /// Create new node using the given config.
-    ///
-    /// Returns the node itself, the user event receiver and the client network
-    /// event receiver.
     pub async fn new(config: NodeConfig) -> Result<Self> {
         let mut rng = config.rng;
         let full_id = config.full_id.unwrap_or_else(|| FullId::gen(&mut rng));
@@ -288,7 +285,7 @@ impl Node {
             .await
     }
 
-    /// Disconnect form a client peer.
+    /// Disconnect from a client peer.
     // TODO: remove function??
     pub fn disconnect_from_client(&mut self, peer_addr: SocketAddr) -> Result<()> {
         // self.core.transport.disconnect(peer_addr);
@@ -380,24 +377,6 @@ impl Node {
     ////////////////////////////////////////////////////////////////////////////
     // Transitions
     ////////////////////////////////////////////////////////////////////////////
-
-    // Transition from Approved to Bootstrapping on relocation
-    /*async fn relocate(&mut self, params: RelocateParams) -> Result<()> {
-        let RelocateParams {
-            conn_infos,
-            details,
-        } = params;
-
-        let mut stage = Bootstrapping::new(Some(details));
-
-        let mut core = self.core.lock().await;
-        for conn_info in conn_infos {
-            stage.send_bootstrap_request(&mut core, conn_info).await?;
-        }
-
-        self.stage = Stage::Bootstrapping(stage);
-        Ok(())
-    }*/
 
     /*async fn set_log_ident(&self) -> log_utils::Guard {
         use std::fmt::Write;
