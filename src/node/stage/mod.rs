@@ -17,6 +17,7 @@ use crate::{
     error::{Result, RoutingError},
     event::Event,
     id::{FullId, P2pNode},
+    location::{DstLocation, SrcLocation},
     messages::{Message, Variant},
     network_params::NetworkParams,
     rng::MainRng,
@@ -38,12 +39,12 @@ enum State {
     Bootstrapping(Bootstrapping),
     Joining(Joining),
     Approved(Approved),
-    Terminated,
 }
 
 pub(crate) struct Stage {
     state: State,
     comm: Comm,
+    full_id: FullId,
 }
 
 impl Stage {
@@ -79,7 +80,7 @@ impl Stage {
             shared_state,
             0,
             Some(section_key_share),
-            full_id,
+            full_id.clone(),
             network_params,
             rng,
         )?;
@@ -87,6 +88,7 @@ impl Stage {
         Ok(Self {
             state: State::Approved(state),
             comm,
+            full_id,
         })
     }
 
@@ -114,6 +116,7 @@ impl Stage {
         Ok(Self {
             state: State::Bootstrapping(state),
             comm,
+            full_id,
         })
     }
 
@@ -124,30 +127,29 @@ impl Stage {
         }
     }
 
-    pub fn approved_mut(&mut self) -> Option<&mut Approved> {
-        // FIXME!!!!!!!!
-        match &self.state {
-            State::Approved(stage) => None, //Some(&mut stage),
-            _ => None,
-        }
-    }
-
     /// Returns connection info of this node.
     pub fn our_connection_info(&mut self) -> Result<SocketAddr> {
-        match self.state {
-            State::Bootstrapping(_) | State::Joining(_) | State::Approved(_) => {
-                self.comm.our_connection_info()
-            }
-            State::Terminated => Err(RoutingError::InvalidState),
-        }
+        self.comm.our_connection_info()
     }
 
     pub fn listen_events(&mut self) -> Result<IncomingConnections> {
-        match self.state {
-            State::Bootstrapping(_) | State::Joining(_) | State::Approved(_) => {
-                self.comm.listen_events()
+        self.comm.listen_events()
+    }
+
+    /// Send a message.
+    pub async fn send_message(
+        &mut self,
+        src: SrcLocation,
+        dst: DstLocation,
+        content: Bytes,
+    ) -> Result<()> {
+        match &mut self.state {
+            State::Approved(stage) => {
+                stage
+                    .send_routing_message(src, dst, Variant::UserMessage(content), None)
+                    .await
             }
-            State::Terminated => Err(RoutingError::InvalidState),
+            _ => Err(RoutingError::InvalidState),
         }
     }
 
@@ -156,11 +158,21 @@ impl Stage {
         recipient: &SocketAddr,
         msg: Bytes,
     ) -> Result<()> {
-        match self.state {
-            State::Bootstrapping(_) | State::Joining(_) | State::Approved(_) => {
-                self.comm.send_message_to_target(recipient, msg).await
-            }
-            State::Terminated => Err(RoutingError::InvalidState),
+        self.comm.send_message_to_target(recipient, msg).await
+    }
+
+    /// Checks whether the given location represents self.
+    pub fn in_dst_location(&self, dst: &DstLocation) -> bool {
+        match &self.state {
+            State::Bootstrapping(_) | State::Joining(_) => match dst {
+                DstLocation::Node(name) => name == self.full_id.public_id().name(),
+                DstLocation::Section(_) | DstLocation::Client(_) => false,
+                DstLocation::Direct => true,
+            },
+            State::Approved(stage) => dst.contains(
+                self.full_id.public_id().name(),
+                stage.shared_state.our_prefix(),
+            ),
         }
     }
 
@@ -195,21 +207,13 @@ impl Stage {
 
                 Ok(event_to_relay)
             }
-            State::Terminated => Err(RoutingError::InvalidState),
-        }
-    }
-    /// Returns whether this node is running or has been terminated.
-    pub fn is_running(&self) -> bool {
-        match self.state {
-            State::Bootstrapping(_) | State::Joining(_) | State::Approved(_) => true,
-            State::Terminated => false,
         }
     }
 
     /// Our `Prefix` once we are a part of the section.
     pub fn our_prefix(&self) -> Option<&Prefix> {
         match &self.state {
-            State::Bootstrapping(_) | State::Joining(_) | State::Terminated => None,
+            State::Bootstrapping(_) | State::Joining(_) => None,
             State::Approved(stage) => Some(stage.shared_state.our_prefix()),
         }
     }

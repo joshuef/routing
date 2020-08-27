@@ -868,7 +868,6 @@ impl Approved {
         self.shared_state.update(shared_state)?;
 
         self.reset_parsec(parsec_version)?;
-        //self.gossip_timer_token = Some(core.timer.schedule(self.consensus_engine.gossip_period()));
 
         match self.section_keys_provider.finalise_dkg(
             self.full_id.public_id().name(),

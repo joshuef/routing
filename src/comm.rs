@@ -84,7 +84,7 @@ impl Comm {
         }
 
         trace!(
-            "Sending message with token to {:?}",
+            "Sending message to {:?}",
             &conn_infos[..delivery_group_size.min(conn_infos.len())]
         );
 
@@ -103,7 +103,7 @@ impl Comm {
         msg: Bytes,
     ) -> Result<()> {
         trace!("Sending message to target {:?}", recipient);
-        // TODO: can we keep the Connections to nodes to make this more efficient??
+        // TODO: can we cache the Connections to nodes to make this more efficient??
         let conn = self.endpoint.connect_to(recipient).await?;
         conn.send_uni(msg).await.map_err(RoutingError::Network)
     }

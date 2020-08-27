@@ -22,7 +22,6 @@ use crate::{
     id::{FullId, P2pNode, PublicId},
     location::{DstLocation, SrcLocation},
     log_utils,
-    messages::Variant,
     network_params::NetworkParams,
     rng::{self, MainRng},
     section::SectionProofChain,
@@ -127,11 +126,6 @@ impl Node {
         ))
     }
 
-    /// Returns whether this node is running or has been terminated.
-    pub fn is_running(&self) -> bool {
-        futures::executor::block_on(self.stage.lock()).is_running()
-    }
-
     /// Returns the `PublicId` of this node.
     pub fn id(&self) -> &PublicId {
         self.full_id.public_id()
@@ -216,38 +210,6 @@ impl Node {
         //.collect()
     }
 
-    /// Checks whether the given location represents self.
-    pub fn in_dst_location(&self, dst: &DstLocation) -> bool {
-        // FIXME
-        /*let stage = futures::executor::block_on(self.stage.lock());
-        match stage {
-            Stage::Bootstrapping(_) | Stage::Joining(_) => match dst {
-                DstLocation::Node(name) => name == self.name(),
-                DstLocation::Section(_) => false,
-                DstLocation::Direct => true,
-                DstLocation::Client(_) => false,
-            },
-            Stage::Approved(stage) => dst.contains(self.name(), stage.shared_state.our_prefix()),
-            Stage::Terminated => false,
-        }*/
-        true
-    }
-
-    /// Vote for a user-defined event.
-    /// Returns `InvalidState` error if we are not an elder.
-    pub fn vote_for_user_event(&mut self, event: Vec<u8>) -> Result<()> {
-        let our_id = self.id().clone();
-        if let Some(stage) = futures::executor::block_on(self.stage.lock())
-            .approved_mut()
-            .filter(|stage| stage.is_our_elder(&our_id))
-        {
-            stage.vote_for_user_event(event);
-            Ok(())
-        } else {
-            Err(RoutingError::InvalidState)
-        }
-    }
-
     /// Send a message.
     pub async fn send_message(
         &mut self,
@@ -261,14 +223,11 @@ impl Node {
 
         //let _log_ident = self.set_log_ident();
 
-        match self.stage.lock().await.approved_mut() {
-            None => Err(RoutingError::InvalidState),
-            Some(approved_stage) => {
-                approved_stage
-                    .send_routing_message(src, dst, Variant::UserMessage(content), None)
-                    .await
-            }
-        }
+        self.stage
+            .lock()
+            .await
+            .send_message(src, dst, content)
+            .await
     }
 
     /// Send a message to a client peer.
@@ -553,9 +512,7 @@ impl Node {
 
     /// Returns the latest BLS public key of our section or `None` if we are not joined yet.
     pub fn section_key(&self) -> Option<&bls::PublicKey> {
-        self.stage
-            .approved()
-            .map(|stage| stage.shared_state.our_history.last_key())
+        self.shared_state.map(|state| state.our_history.last_key())
     }
 
     pub(crate) fn shared_state(&self) -> Option<&SharedState> {

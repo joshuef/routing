@@ -54,12 +54,17 @@ impl EventStream {
                 return relay_event;
             } else if let Some((src, message)) = msg {
                 // Process the message according to our stage
-                let relay_event = self.stage.lock().await.process_message(src, message).await;
+                let relay_event = self
+                    .stage
+                    .lock()
+                    .await
+                    .process_message(src, message)
+                    .await;
 
                 match relay_event {
                     Ok(Some(new_event)) => return Some(new_event),
-                    Ok(None) => {}
-                    Err(err) => error!("Error encountered when processing message: {}", err),
+                    Ok(None) => {},
+                    Err(err) => error!("Error encountered when processing message: {}", err)
                 }
             }
         }
@@ -156,6 +161,10 @@ async fn handle_node_message(
                 None
             };
 
+            /*if !stage.lock().await.in_dst_location(msg.dst()) {
+                return Ok(());
+            }*/
+
             Some((event_to_relay, Some((sender, msg))))
 
             /*if !node.in_dst_location(msg.dst()) || msg.dst().is_section() {
@@ -165,10 +174,6 @@ async fn handle_node_message(
                     Stage::Bootstrapping(_) | Stage::Joining(_) | Stage::Terminated => Ok(()),
                 }
             }*/
-
-            //if !node.in_dst_location(msg.dst()) {
-            //    return Ok(());
-            //}
 
             // TODO: filter messages which are already handled???
             /*if self.core.msg_filter.contains_incoming(&msg) {
