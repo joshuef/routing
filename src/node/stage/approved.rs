@@ -302,6 +302,7 @@ impl Approved {
     }
 
     async fn progress_dkg(&mut self) {
+        trace!("Progressing DKG");
         for (dkg_key, message) in self.dkg_voter.progress_dkg(&mut self.rng) {
             let _ = self.broadcast_dkg_message(dkg_key.0, dkg_key.1, message);
         }
@@ -1270,13 +1271,16 @@ impl Approved {
 
         let msg_parsed = bincode::deserialize(&message_bytes[..])?;
 
-        trace!("processing dkg message {:?}", msg_parsed);
+        trace!("processing received dkg message {:?}", msg_parsed);
 
         let responses = self.dkg_voter.process_dkg_message(
             &mut self.rng,
             &(participants.clone(), section_key_index),
             msg_parsed,
         );
+
+
+        trace!("dkg responses to be sent: {:?}", responses);
 
         // Only a valid DkgMessage, which results in some responses, shall reset the ticker.
         if !responses.is_empty() {
@@ -1285,7 +1289,7 @@ impl Approved {
         }
 
         for response in responses {
-            let _ = self.broadcast_dkg_message(participants.clone(), section_key_index, response);
+            let _ = futures::executor::block_on(self.broadcast_dkg_message(participants.clone(), section_key_index, response));
         }
 
         self.try_forward_dkg_message_to_non_elder(
@@ -1378,7 +1382,7 @@ impl Approved {
         if self.poll_relocation() {
             return Ok(true);
         }
-
+        
         let (event, proof) = match self.consensus_engine.poll(self.shared_state.sections.our()) {
             None => return Ok(false),
             Some((event, proof)) => (event, proof),
@@ -1402,6 +1406,7 @@ impl Approved {
             return false;
         }
 
+        debug!("Attempting to promote/demote elders");
         self.members_changed = false;
 
         let new_infos = if let Some(new_infos) = self
@@ -1467,6 +1472,7 @@ impl Approved {
     }
 
     fn init_dkg_gen(&mut self, participants: BTreeSet<PublicId>, section_key_index: u64) {
+        trace!("Init of DKG for participants: {:?}", participants);
         if section_key_index < self.shared_state.our_history.last_key_index()
             || self.section_keys_provider.has_dkg(&participants)
         {
@@ -1481,7 +1487,7 @@ impl Approved {
             .dkg_voter
             .init_dkg_gen(&self.full_id, &(participants.clone(), section_key_index))
         {
-            let _ = self.broadcast_dkg_message(participants.clone(), section_key_index, message);
+            let _ = futures::executor::block_on(self.broadcast_dkg_message(participants.clone(), section_key_index, message));
             //self.dkg_voter
             //    .set_timer_token(core.timer.schedule(DKG_PROGRESS_INTERVAL));
         }

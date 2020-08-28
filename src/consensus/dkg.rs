@@ -144,7 +144,7 @@ impl DkgVoter {
     pub fn progress_dkg(&mut self, rng: &mut MainRng) -> Vec<(DkgKey, DkgMessage<PublicId>)> {
         let mut broadcast = Vec::new();
         for (key, key_gen) in self.key_gen_map.iter_mut() {
-            debug!("Progressing DKG {:?}", key);
+            debug!("Progressing DKG w/ key: {:?}", key);
             if let Ok(messages) = key_gen.timed_phase_transition(rng) {
                 for message in messages {
                     broadcast.push((key.clone(), message));
