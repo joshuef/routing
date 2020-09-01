@@ -956,7 +956,6 @@ impl Approved {
             .shared_state
             .promote_and_demote_elders(&core.network_params, core.name())
         {
-            self.churn_in_progress = true;
             new_infos
         } else {
             self.churn_in_progress = false;
@@ -1022,12 +1021,14 @@ impl Approved {
                 if let Some(index) = self.shared_state.our_history.index_of(&our_key) {
                     if index > dkg_key.1 {
                         trace!("DKG for {:?} already completed", dkg_key);
+                        return;
                     }
                 }
             }
         }
 
         for message in self.dkg_voter.init_dkg_gen(&core.full_id, dkg_key) {
+            self.churn_in_progress = true;
             let _ = self.broadcast_dkg_message(core, dkg_key, message);
             self.dkg_voter
                 .set_timer_token(core.timer.schedule(DKG_PROGRESS_INTERVAL));
