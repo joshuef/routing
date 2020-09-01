@@ -8,10 +8,14 @@
 
 use super::elders_info::EldersInfo;
 use crate::{
-    consensus::DkgResult,
+    consensus::{DkgKey, DkgResult},
     error::{Result, RoutingError},
+    id::PublicId,
 };
-use std::{collections::BTreeMap, mem};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    mem,
+};
 use xor_name::XorName;
 
 /// All the key material needed to sign or combine signature for our section key.
@@ -31,7 +35,7 @@ pub struct SectionKeysProvider {
     /// Our current section BLS keys.
     current: Option<SectionKeyShare>,
     /// The new keys to use when section update completes.
-    pending: BTreeMap<u64, DkgResult>,
+    pending: BTreeMap<DkgKey, DkgResult>,
 }
 
 impl SectionKeysProvider {
@@ -57,11 +61,11 @@ impl SectionKeysProvider {
     }
 
     /// Handles a completed DKG
-    pub fn handle_dkg_result_event(&mut self, section_key_index: u64, dkg_result: DkgResult) {
-        let _ = self.pending.entry(section_key_index).or_insert_with(|| {
+    pub fn handle_dkg_result_event(&mut self, dkg_key: &DkgKey, dkg_result: DkgResult) {
+        let _ = self.pending.entry(dkg_key.clone()).or_insert_with(|| {
             trace!(
-                "insert pending DKG result #{}: {:?}",
-                section_key_index,
+                "insert pending DKG result #{:?}: {:?}",
+                dkg_key,
                 dkg_result.public_key_set.public_key()
             );
             dkg_result
@@ -74,18 +78,24 @@ impl SectionKeysProvider {
         our_name: &XorName,
         elders_info: &EldersInfo,
     ) {
-        let dkg_result = if let Some(result) = self.pending.remove(&section_key_index) {
-            result
+        let (dkg_key, dkg_result) = if let Some((dkg_key, dkg_result)) = self
+            .pending
+            .iter()
+            .find(|(dkg_key, _)| dkg_key.1 == section_key_index)
+        {
+            (dkg_key.clone(), dkg_result.clone())
         } else {
             trace!("missing pending DKG result #{}", section_key_index);
             return;
         };
 
+        let _ = self.pending.remove(&dkg_key);
+
         let public_key_set = dkg_result.public_key_set;
 
         trace!(
-            "finalise DKG result #{}: {:?}",
-            section_key_index,
+            "finalise DKG result #{:?}: {:?}",
+            dkg_key,
             public_key_set.public_key()
         );
 
@@ -104,11 +114,13 @@ impl SectionKeysProvider {
 
         self.pending = mem::take(&mut self.pending)
             .into_iter()
-            .filter(|(index, _)| *index > section_key_index)
+            .filter(|(key, _)| key.1 > dkg_key.1)
             .collect();
     }
 
-    pub fn has_pending(&self, section_key_index: u64) -> bool {
-        self.pending.contains_key(&section_key_index)
+    pub fn has_pending(&self, participants: &BTreeSet<PublicId>) -> bool {
+        self.pending
+            .iter()
+            .any(|(dkg_key, _)| &dkg_key.0 == participants)
     }
 }

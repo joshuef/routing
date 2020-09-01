@@ -968,6 +968,9 @@ impl Approved {
 
         for info in new_infos {
             let participants: BTreeSet<_> = info.elder_ids().copied().collect();
+            // Both consensus on OurKey and Online could make shared_state.promote_and_demote_elders
+            // return with NewInfos, which results in dkg_key with same participants but different
+            // section_key_index.
             let section_key_index = self.shared_state.our_history.last_key_index();
             let dkg_key = (participants, section_key_index);
 
@@ -1011,7 +1014,7 @@ impl Approved {
     }
 
     fn init_dkg_gen(&mut self, core: &mut Core, dkg_key: &DkgKey) {
-        if self.section_keys_provider.has_pending(dkg_key.1) {
+        if self.section_keys_provider.has_pending(&dkg_key.0) {
             trace!("DKG for {:?} already completed", dkg_key);
             return;
         }
@@ -1333,7 +1336,7 @@ impl Approved {
         info!("handle DKG result {:?} for {:?}", public_key, dkg_key);
 
         self.section_keys_provider
-            .handle_dkg_result_event(dkg_key.1, dkg_result.clone());
+            .handle_dkg_result_event(&dkg_key, dkg_result.clone());
 
         if let Some(index) = self.shared_state.our_history.index_of(&public_key) {
             // Our shared state is already up to date, so no need to vote. Just finalize the DKG so

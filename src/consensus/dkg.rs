@@ -184,7 +184,10 @@ impl DkgVoter {
         dkg_key: &DkgKey,
     ) -> Vec<DkgMessage<PublicId>> {
         if (self.current_section_key_index > 0 && self.current_section_key_index >= dkg_key.1)
-            || self.key_gen_map.iter().any(|(key, _)| key.1 == dkg_key.1)
+            || self
+                .key_gen_map
+                .iter()
+                .any(|(key, _)| key.0 == dkg_key.0 || key.1 == dkg_key.1)
         {
             trace!("already have key_gen of {:?}", dkg_key);
             return vec![];
