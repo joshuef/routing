@@ -8,10 +8,13 @@
 
 use crate::location::{DstLocation, SrcLocation};
 
+use bytes::Bytes;
 use hex_fmt::HexFmt;
+use quic_p2p::SendStream;
 use std::{
     collections::BTreeSet,
     fmt::{self, Debug, Formatter},
+    net::SocketAddr,
 };
 use xor_name::{Prefix, XorName};
 
@@ -31,7 +34,6 @@ pub enum Connected {
 ///
 /// `Request` and `Response` events from section locations are only raised once the quorum has
 /// been reached, i.e. enough members of the section have sent the same message.
-#[derive(Clone, Eq, PartialEq)]
 // FIXME - See https://maidsafe.atlassian.net/browse/MAID-2026 for info on removing this exclusion.
 #[allow(clippy::large_enum_variant)]
 pub enum Event {
@@ -40,7 +42,7 @@ pub enum Event {
     /// Received a message.
     MessageReceived {
         /// The content of the message.
-        content: Vec<u8>,
+        content: Bytes,
         /// The source location that sent the message.
         src: SrcLocation,
         /// The destination location that receives the message.
@@ -95,8 +97,17 @@ pub enum Event {
     },
     /// Disconnected or failed to connect - restart required.
     RestartRequired,
-    /// Startup failed - terminate.
-    Terminated,
+    /// Received a message from a client node.
+    ClientMessageReceived {
+        /// The content of the message.
+        content: Bytes,
+        /// The address of the client that sent the message.
+        src: SocketAddr,
+        /// The destination location that receives the message.
+        dst: DstLocation,
+        /// Stream to send messages back to the client that sent the message
+        stream: SendStream,
+    },
 }
 
 impl Debug for Event {
@@ -149,7 +160,15 @@ impl Debug for Event {
                 .field("destination", destination)
                 .finish(),
             Self::RestartRequired => write!(formatter, "RestartRequired"),
-            Self::Terminated => write!(formatter, "Terminated"),
+            Self::ClientMessageReceived {
+                content, src, dst, ..
+            } => write!(
+                formatter,
+                "ClientMessageReceived {{ content: \"{:<8}\", src: {:?}, dst: {:?} }}",
+                HexFmt(content),
+                src,
+                dst
+            ),
         }
     }
 }
