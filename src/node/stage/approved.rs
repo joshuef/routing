@@ -287,11 +287,17 @@ impl Approved {
     }
 
     fn progress_dkg(&mut self, core: &mut Core) {
+        let prev_has_dkg_voter = self.dkg_voter.has_live_dkg_voter();
         for (dkg_key, message) in self.dkg_voter.progress_dkg(&mut core.rng) {
             let _ = self.broadcast_dkg_message(core, &dkg_key, message);
         }
 
         self.check_dkg(core);
+
+        if prev_has_dkg_voter && !self.dkg_voter.has_live_dkg_voter() {
+            self.churn_in_progress = false;
+            self.promote_and_demote_elders(core);
+        }
     }
 
     /// Is the node with the given id an elder in our section?
@@ -1336,7 +1342,7 @@ impl Approved {
         info!("handle DKG result {:?} for {:?}", public_key, dkg_key);
 
         self.section_keys_provider
-            .handle_dkg_result_event(&dkg_key, dkg_result.clone());
+            .handle_dkg_result_event(dkg_key, dkg_result.clone());
 
         if let Some(index) = self.shared_state.our_history.index_of(&public_key) {
             // Our shared state is already up to date, so no need to vote. Just finalize the DKG so
