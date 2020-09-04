@@ -333,7 +333,7 @@ impl Approved {
         let our_id = self.full_id.public_id();
 
         trace!(
-            "deciding message status based upon variant: {:?}",
+            "Deciding message status based upon variant: {:?}",
             msg.variant()
         );
         match msg.variant() {
@@ -1022,7 +1022,7 @@ impl Approved {
         sender: PublicId,
         events_tx: &mut mpsc::Sender<Event>,
     ) -> Result<()> {
-        trace!("handle DKG message of {:?} from {}", dkg_key, sender);
+        trace!("Handling DKG message of {:?} from {}", dkg_key, sender);
 
         if dkg_key.0.contains(self.full_id.public_id()) {
             self.init_dkg_gen(dkg_key).await;
@@ -1114,7 +1114,9 @@ impl Approved {
     // Generate a new section info based on the current set of members and vote for it if it
     // changed.
     async fn promote_and_demote_elders(&mut self) {
+        trace!("Promote and demote elders");
         if self.churn_in_progress {
+            trace!("Churn already underway");
             // Nothing changed that could impact elder set, or we cannot process it yet.
             return;
         }
@@ -1142,6 +1144,7 @@ impl Approved {
             let dkg_key = (participants, section_key_index);
 
             trace!("start DKG {:?}", dkg_key);
+            
 
             if let Some(dkg_result) = self.dkg_voter.push_info(&dkg_key, info) {
                 // Got notified of the DKG result, happen during split or demote.
@@ -1181,6 +1184,7 @@ impl Approved {
     }
 
     async fn init_dkg_gen(&mut self, dkg_key: &DkgKey) {
+        info!("Init of DKG gen");
         if self.section_keys_provider.has_pending(&dkg_key.0) {
             trace!("DKG for {:?} already completed", dkg_key);
             return;
@@ -1197,9 +1201,10 @@ impl Approved {
             }
         }
 
+
         for message in self.dkg_voter.init_dkg_gen(&self.full_id, dkg_key) {
             self.churn_in_progress = true;
-            let _ = self.broadcast_dkg_message(dkg_key, message);
+            let _ = self.broadcast_dkg_message(dkg_key, message).await;
             // TODO ??
             //self.dkg_voter
             //    .set_timer_token(core.timer.schedule(DKG_PROGRESS_INTERVAL));

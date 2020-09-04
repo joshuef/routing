@@ -194,6 +194,7 @@ impl DkgVoter {
         full_id: &FullId,
         dkg_key: &DkgKey,
     ) -> Vec<DkgMessage<PublicId>> {
+        trace!("Init dkg gen");
         if (self.current_section_key_index > 0 && self.current_section_key_index >= dkg_key.1)
             || self
                 .key_gen_map
@@ -207,7 +208,6 @@ impl DkgVoter {
         let threshold = threshold_count(dkg_key.0.len());
 
         if let Ok((key_gen, message)) = KeyGen::initialize(full_id, threshold, dkg_key.0.clone()) {
-            debug!("started key_gen of {:?}", dkg_key);
 
             let _ = self.key_gen_map.insert(dkg_key.clone(), key_gen);
             vec![message]

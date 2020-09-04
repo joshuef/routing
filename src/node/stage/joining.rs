@@ -141,6 +141,7 @@ impl Joining {
     }*/
 
     fn decide_message_status(&self, msg: &Message) -> Result<MessageStatus> {
+        trace!("Deciding message status: {:?}", msg);
         match msg.variant() {
             Variant::NodeApproval(_) => {
                 let trusted_key = match &self.join_type {
