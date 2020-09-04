@@ -6,7 +6,12 @@
 // KIND, either express or implied. Please review the Licences for the specific language governing
 // permissions and limitations relating to use of the SAFE Network Software.
 
-use crate::{event::Event, location::DstLocation, messages::Message, node::stage::Stage};
+use crate::{
+    event::{Connected, Event},
+    location::DstLocation,
+    messages::Message,
+    node::stage::Stage,
+};
 use bytes::Bytes;
 use futures::lock::Mutex;
 use quic_p2p::{IncomingConnections, IncomingMessages, Message as QuicP2pMsg};
@@ -29,9 +34,16 @@ impl EventStream {
         stage: Arc<Mutex<Stage>>,
         incoming_conns: IncomingConnections,
         xorname: XorName,
+        is_genesis: bool,
     ) -> Self {
         let (events_tx, events_rx) = mpsc::channel::<Event>(MAX_EVENTS_BUFFERED);
-        Self::spawn_connections_handler(stage.clone(), events_tx, incoming_conns, xorname);
+        Self::spawn_connections_handler(
+            stage.clone(),
+            events_tx,
+            incoming_conns,
+            xorname,
+            is_genesis,
+        );
 
         Self { events_rx }
     }
@@ -44,11 +56,21 @@ impl EventStream {
     // Spawns a task which handles each new incoming connection from peers
     fn spawn_connections_handler(
         stage: Arc<Mutex<Stage>>,
-        events_tx: mpsc::Sender<Event>,
+        mut events_tx: mpsc::Sender<Event>,
         mut incoming_conns: IncomingConnections,
         xorname: XorName,
+        is_genesis: bool,
     ) {
         let _ = tokio::spawn(async move {
+            if is_genesis {
+                if let Err(err) = events_tx.send(Event::Connected(Connected::First)).await {
+                    trace!("Error reporting new Event: {:?}", err);
+                }
+                if let Err(err) = events_tx.send(Event::PromotedToElder).await {
+                    trace!("Error reporting new Event: {:?}", err);
+                }
+            }
+
             while let Some(incoming_msgs) = incoming_conns.next().await {
                 trace!(
                     "New connection established by peer {}",

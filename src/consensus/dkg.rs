@@ -208,7 +208,6 @@ impl DkgVoter {
         let threshold = threshold_count(dkg_key.0.len());
 
         if let Ok((key_gen, message)) = KeyGen::initialize(full_id, threshold, dkg_key.0.clone()) {
-
             let _ = self.key_gen_map.insert(dkg_key.clone(), key_gen);
             vec![message]
         } else {

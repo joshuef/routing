@@ -78,7 +78,7 @@ impl Default for NodeConfig {
 pub struct Node {
     stage: Arc<Mutex<Stage>>,
     full_id: FullId,
-    is_genesis: bool
+    is_genesis: bool,
 }
 
 impl Node {
@@ -115,7 +115,7 @@ impl Node {
         Ok(Self {
             stage: Arc::new(Mutex::new(stage)),
             full_id,
-            is_genesis
+            is_genesis,
         })
     }
 
@@ -126,6 +126,7 @@ impl Node {
             Arc::clone(&self.stage),
             incoming_conns,
             *self.full_id.public_id().name(),
+            self.is_genesis,
         ))
     }
 

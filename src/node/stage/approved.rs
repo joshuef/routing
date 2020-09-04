@@ -412,6 +412,7 @@ impl Approved {
         msg: Message,
         mut events_tx: &mut mpsc::Sender<Event>,
     ) -> Result<Option<Bootstrapping>> {
+        self.msg_filter.insert_incoming(&msg);
         match msg.variant() {
             Variant::NeighbourInfo { elders_info, .. } => {
                 msg.dst().check_is_section()?;
@@ -1144,7 +1145,6 @@ impl Approved {
             let dkg_key = (participants, section_key_index);
 
             trace!("start DKG {:?}", dkg_key);
-            
 
             if let Some(dkg_result) = self.dkg_voter.push_info(&dkg_key, info) {
                 // Got notified of the DKG result, happen during split or demote.
@@ -1200,7 +1200,6 @@ impl Approved {
                 }
             }
         }
-
 
         for message in self.dkg_voter.init_dkg_gen(&self.full_id, dkg_key) {
             self.churn_in_progress = true;
