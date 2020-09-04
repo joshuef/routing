@@ -78,6 +78,7 @@ impl Default for NodeConfig {
 pub struct Node {
     stage: Arc<Mutex<Stage>>,
     full_id: FullId,
+    is_genesis: bool
 }
 
 impl Node {
@@ -92,9 +93,9 @@ impl Node {
         let node_name = full_id.public_id().name().clone();
         let transport_config = config.transport_config;
         let network_params = config.network_params;
-        let as_first_node = config.first;
+        let is_genesis = config.first;
 
-        let stage = if as_first_node {
+        let stage = if is_genesis {
             match Stage::first_node(transport_config, full_id.clone(), network_params, rng).await {
                 Ok(stage) => {
                     info!("{} Started a new network as a seed node.", node_name);
@@ -114,6 +115,7 @@ impl Node {
         Ok(Self {
             stage: Arc::new(Mutex::new(stage)),
             full_id,
+            is_genesis
         })
     }
 
@@ -125,6 +127,11 @@ impl Node {
             incoming_conns,
             *self.full_id.public_id().name(),
         ))
+    }
+
+    /// Is this the genesis node or not
+    pub fn is_genesis(&self) -> bool {
+        self.is_genesis
     }
 
     /// Returns the `PublicId` of this node.
