@@ -96,7 +96,7 @@ impl EventStream {
         let _ = tokio::spawn(async move {
             while let Some(msg) = incoming_msgs.next().await {
                 match msg {
-                    QuicP2pMsg::UniStream { bytes, src } => {
+                    QuicP2pMsg::UniStream { bytes, src, .. } => {
                         trace!(
                             "New message ({} bytes) received on a uni-stream from: {}",
                             bytes.len(),
@@ -107,7 +107,12 @@ impl EventStream {
                         // reported to the event stream consumer.
                         spawn_node_message_handler(stage.clone(), events_tx.clone(), bytes, src);
                     }
-                    QuicP2pMsg::BiStream { bytes, src, send } => {
+                    QuicP2pMsg::BiStream {
+                        bytes,
+                        src,
+                        send,
+                        recv,
+                    } => {
                         trace!(
                             "New message ({} bytes) received on a bi-stream from: {}",
                             bytes.len(),
@@ -121,7 +126,8 @@ impl EventStream {
                             content: bytes,
                             src,
                             dst: DstLocation::Node(xorname),
-                            stream: send,
+                            send,
+                            recv,
                         };
 
                         if let Err(err) = events_tx.send(event).await {

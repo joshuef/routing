@@ -10,7 +10,7 @@ use crate::location::{DstLocation, SrcLocation};
 
 use bytes::Bytes;
 use hex_fmt::HexFmt;
-use quic_p2p::SendStream;
+use quic_p2p::{RecvStream, SendStream};
 use std::{
     collections::BTreeSet,
     fmt::{self, Debug, Formatter},
@@ -106,7 +106,9 @@ pub enum Event {
         /// The destination location that receives the message.
         dst: DstLocation,
         /// Stream to send messages back to the client that sent the message
-        stream: SendStream,
+        send: SendStream,
+        /// Stream to receive more messages from the client on the same channel
+        recv: RecvStream,
     },
 }
 
