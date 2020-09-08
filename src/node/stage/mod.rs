@@ -25,7 +25,7 @@ use crate::{
     TransportConfig,
 };
 use bytes::Bytes;
-use quic_p2p::IncomingConnections;
+use qp2p::IncomingConnections;
 use serde::Serialize;
 use std::{iter, net::SocketAddr};
 use tokio::sync::mpsc;

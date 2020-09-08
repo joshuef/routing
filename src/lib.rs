@@ -63,7 +63,7 @@
     unused_results,
     clippy::needless_borrow
 )]
-// Need this to stop clippy complaining about the `use quic_p2p` line which is actually necessary.
+// Need this to stop clippy complaining about the `use qp2p` line which is actually necessary.
 #![allow(clippy::single_component_path_imports)]
 */
 #[macro_use]
@@ -84,7 +84,7 @@ pub use self::{
     location::{DstLocation, SrcLocation},
     network_params::NetworkParams,
     node::{EventStream, Node, NodeConfig},
-    quic_p2p::Config as TransportConfig,
+    qp2p::Config as TransportConfig,
     section::SectionProofChain,
 };
 
@@ -161,9 +161,9 @@ const ELDER_SIZE: usize = 7;
 
 // Quic-p2p
 #[cfg(feature = "mock")]
-use mock_quic_p2p as quic_p2p;
+use mock_qp2p as qp2p;
 #[cfg(not(feature = "mock"))]
-use quic_p2p;
+use qp2p;
 
 #[cfg(test)]
 mod tests {

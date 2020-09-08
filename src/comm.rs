@@ -14,19 +14,19 @@ use crate::{
 };
 use bytes::Bytes;
 use hex_fmt::HexFmt;
-use quic_p2p::{Config, Connection, Endpoint, IncomingConnections, QuicP2p};
+use qp2p::{Config, Connection, Endpoint, IncomingConnections, QuicP2p};
 use std::{boxed::Box, net::SocketAddr, sync::Arc};
 
 // Communication component of the node to interact with other nodes.
 #[derive(Clone)]
 pub(crate) struct Comm {
-    quic_p2p: Arc<Box<QuicP2p>>,
+    qp2p: Arc<Box<QuicP2p>>,
     endpoint: Arc<Box<Endpoint>>,
 }
 
 impl Comm {
     pub async fn new(transport_config: Config) -> Result<Self> {
-        let quic_p2p = Arc::new(Box::new(QuicP2p::with_config(
+        let qp2p = Arc::new(Box::new(QuicP2p::with_config(
             Some(transport_config),
             Default::default(),
             true,
@@ -34,24 +34,24 @@ impl Comm {
 
         // Don't bootstrap, just create an endpoint where to listen to
         // the incoming messages from other nodes.
-        let endpoint = Arc::new(Box::new(quic_p2p.new_endpoint()?));
+        let endpoint = Arc::new(Box::new(qp2p.new_endpoint()?));
 
-        Ok(Self { quic_p2p, endpoint })
+        Ok(Self { qp2p, endpoint })
     }
 
     pub async fn from_bootstrapping(transport_config: Config) -> Result<(Self, Connection)> {
-        let mut quic_p2p = QuicP2p::with_config(Some(transport_config), Default::default(), true)?;
+        let mut qp2p = QuicP2p::with_config(Some(transport_config), Default::default(), true)?;
 
         // Bootstrap to the network returning the connection to a node.
-        let (endpoint, connection) = quic_p2p
+        let (endpoint, connection) = qp2p
             .bootstrap()
             .await
             .map_err(|err| RoutingError::ToBeDefined(format!("{}", err)))?;
 
-        let quic_p2p = Arc::new(Box::new(quic_p2p));
+        let qp2p = Arc::new(Box::new(qp2p));
         let endpoint = Arc::new(Box::new(endpoint));
 
-        Ok((Self { quic_p2p, endpoint }, connection))
+        Ok((Self { qp2p, endpoint }, connection))
     }
 
     /// Starts listening for events returning a stream where to read them from.

@@ -14,7 +14,7 @@ use crate::{
 };
 use bytes::Bytes;
 use futures::lock::Mutex;
-use quic_p2p::{IncomingConnections, IncomingMessages, Message as QuicP2pMsg};
+use qp2p::{IncomingConnections, IncomingMessages, Message as QuicP2pMsg};
 use std::{net::SocketAddr, sync::Arc};
 use tokio::sync::mpsc;
 use xor_name::XorName;
