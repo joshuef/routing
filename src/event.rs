@@ -51,6 +51,8 @@ pub enum Event {
         previous_name: Option<XorName>,
         /// Age of the node
         age: u8,
+        /// Indication that is has been relocated during startup.
+        startup_relocation: bool,
     },
     /// A node left our section.
     MemberLeft {
@@ -111,11 +113,13 @@ impl Debug for Event {
                 name,
                 previous_name,
                 age,
+                startup_relocation,
             } => formatter
                 .debug_struct("MemberJoined")
                 .field("name", name)
                 .field("previous_name", previous_name)
                 .field("age", age)
+                .field("startup_relocation", startup_relocation)
                 .finish(),
             Self::MemberLeft { name, age } => formatter
                 .debug_struct("MemberLeft")
