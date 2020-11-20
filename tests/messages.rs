@@ -46,7 +46,7 @@ async fn test_messages_client_node() -> Result<()> {
 
     let client = QuicP2p::with_config(Some(config), &[node_addr], false)?;
     let (_, conn) = client.connect_to(&node_addr).await?;
-    let (_, mut recv) = conn.send(Bytes::from_static(msg)).await?;
+    let (_, mut recv) = conn.send_bi(Bytes::from_static(msg)).await?;
 
     // just await for node to respond to client
     node_handler.await??;

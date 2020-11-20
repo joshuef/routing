@@ -54,7 +54,7 @@ impl Comm {
         let quic_p2p = QuicP2p::with_config(Some(transport_config), Default::default(), true)?;
 
         // Bootstrap to the network returning the connection to a node.
-        let (endpoint, conn) = quic_p2p.bootstrap().await?;
+        let (endpoint, conn, _incoming_messages) = quic_p2p.bootstrap().await?;
         let addr = conn.remote_address();
 
         let mut node_conns = LruCache::with_capacity(CONNECTIONS_CACHE_SIZE);
@@ -82,7 +82,7 @@ impl Comm {
     /// next message they send to us will fail the first send attempt (but will likely succeed on
     /// the subsequent one).
     pub fn listen(&self) -> Result<IncomingMessages> {
-        Ok(IncomingMessages::new(self.endpoint.listen()?))
+        Ok(IncomingMessages::new(self.endpoint.listen()))
     }
 
     pub async fn our_connection_info(&self) -> Result<SocketAddr> {
@@ -185,7 +185,7 @@ impl Comm {
         let conn = if let Some(conn) = conn {
             conn
         } else {
-            let conn = self.endpoint.connect_to(recipient).await?;
+            let (conn, _incoming) = self.endpoint.connect_to(recipient).await?;
             let conn = Arc::new(conn);
             let _ = self
                 .node_conns
@@ -499,7 +499,7 @@ mod tests {
         let recv_transport = QuicP2p::with_config(Some(transport_config()), &[], false)?;
         let recv_endpoint = recv_transport.new_endpoint()?;
         let recv_addr = recv_endpoint.socket_addr().await?;
-        let mut recv_incoming_connections = recv_endpoint.listen()?;
+        let mut recv_incoming_connections = recv_endpoint.listen();
 
         // Send the first message.
         let msg0 = Bytes::from_static(b"zero");
@@ -565,7 +565,7 @@ mod tests {
 
             let endpoint = transport.new_endpoint()?;
             let addr = endpoint.socket_addr().await?;
-            let mut incoming_connections = endpoint.listen()?;
+            let mut incoming_connections = endpoint.listen();
 
             let (tx, rx) = mpsc::channel(1);
 

@@ -37,7 +37,7 @@ async fn test_genesis_node() -> Result<()> {
 #[tokio::test]
 async fn test_node_bootstrapping() -> Result<()> {
     let (genesis_node, mut event_stream) = RoutingBuilder::new(None).first().create().await?;
-
+    println!("aaaaaaaaaaaaaa");
     // spawn genesis node events listener
     let genesis_handler = tokio::spawn(async move {
         assert_next_event!(event_stream, Event::PromotedToElder);
@@ -45,6 +45,7 @@ async fn test_node_bootstrapping() -> Result<()> {
         // TODO: we should expect `EldersChanged` too.
         // assert_next_event!(event_stream, Event::EldersChanged { .. });
     });
+    println!("aaaaaaaaaaaaaa222222222222222");
 
     // bootstrap a second node with genesis
     let genesis_contact = genesis_node.our_connection_info().await?;
@@ -52,6 +53,8 @@ async fn test_node_bootstrapping() -> Result<()> {
         .with_contact(genesis_contact)
         .create()
         .await?;
+
+    println!("aaaaaaaaaaaaaa33333333333333333333333");
 
     // just await for genesis node to finish receiving all events
     genesis_handler.await?;
