@@ -82,7 +82,7 @@ async fn test_messages_client_node() -> Result<()> {
     let client_endpoint = client.new_endpoint()?;
     let (conn, _) = client_endpoint.connect_to(&node_addr).await?;
 
-    let client_msg_bytes = WireMsg::serialise_client_msg(&msg_envelope)?;
+    let client_msg_bytes = WireMsg::serialize_client_msg(&msg_envelope)?;
 
     let (_, mut recv) = conn.send_bi(client_msg_bytes).await?;
 

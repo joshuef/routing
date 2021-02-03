@@ -414,7 +414,7 @@ async fn handle_message(
     recv: RecvStream,
     send: Option<SendStream>,
 ) {
-    let message_type = match WireMsg::deserialise(bytes) {
+    let message_type = match WireMsg::deserialize(bytes) {
         Ok(message_type) => message_type,
         Err(error) => {
             error!("Failed to deserialize message from {}: {}", sender, error);

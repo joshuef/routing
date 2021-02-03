@@ -47,7 +47,7 @@ pub(crate) struct Message {
     /// to determine the length of the proof of messages sent to the source so the source would
     /// trust it (the proof needs to start at this key).
     dst_key: Option<bls::PublicKey>,
-    /// Serialised message, this is a signed and fully serialised message ready to send.
+    /// serialized message, this is a signed and fully serialized message ready to send.
     #[serde(skip)]
     serialized: Bytes,
     #[serde(skip)]

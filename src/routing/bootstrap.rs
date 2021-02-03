@@ -530,7 +530,7 @@ impl<'a> MessageReceiver<'a> {
                     match event {
                         ConnectionEvent::Received(qp2p::Message::UniStream {
                             bytes, src, ..
-                        }) => match WireMsg::deserialise(bytes) {
+                        }) => match WireMsg::deserialize(bytes) {
                             Ok(message) => return Some((message, src)),
                             Err(error) => debug!("Failed to deserialize message: {}", error),
                         },
@@ -550,7 +550,7 @@ impl<'a> MessageReceiver<'a> {
 // Keep reading messages from `rx` and send them using `comm`.
 async fn send_messages(mut rx: mpsc::Receiver<(MessageType, Vec<SocketAddr>)>, comm: &Comm) {
     while let Some((message, recipients)) = rx.recv().await {
-        match message.serialise() {
+        match message.serialize() {
             Ok(msg_bytes) => {
                 let _ = comm.send(&recipients, recipients.len(), msg_bytes).await;
             }

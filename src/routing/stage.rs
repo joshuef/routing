@@ -182,7 +182,7 @@ impl Stage {
         delivery_group_size: usize,
         message: MessageType,
     ) -> Result<Vec<Command>> {
-        let msg_bytes = message.serialise()?;
+        let msg_bytes = message.serialize()?;
 
         let cmds = match message {
             MessageType::Ping | MessageType::NodeMessage(_) => self

@@ -143,14 +143,14 @@ impl SignedRelocateDetails {
 }
 
 impl Serialize for SignedRelocateDetails {
-    fn serialize<S: Serializer>(&self, serialiser: S) -> Result<S::Ok, S::Error> {
-        self.signed_msg.serialize(serialiser)
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        self.signed_msg.serialize(serializer)
     }
 }
 
 impl<'de> Deserialize<'de> for SignedRelocateDetails {
-    fn deserialize<D: Deserializer<'de>>(deserialiser: D) -> Result<Self, D::Error> {
-        let signed_msg = Deserialize::deserialize(deserialiser)?;
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let signed_msg = Deserialize::deserialize(deserializer)?;
         Self::new(signed_msg).map_err(|err| {
             D::Error::custom(format!(
                 "failed to construct SignedRelocateDetails: {:?}",
