@@ -198,6 +198,7 @@ impl<'a> State<'a> {
 
     async fn receive_get_section_response(&mut self) -> Result<(GetSectionResponse, SocketAddr)> {
         while let Some((message, sender)) = self.recv_rx.next().await {
+            debug!(">>!!>>!! get sectikon respose");
             match message {
                 MessageType::NetworkInfo(NetworkInfoMsg::GetSectionResponse(response)) => {
                     match response {
@@ -372,6 +373,8 @@ impl<'a> State<'a> {
         relocate_payload: Option<&RelocatePayload>,
     ) -> Result<(JoinResponse, SocketAddr)> {
         while let Some((message, sender)) = self.recv_rx.next().await {
+            debug!(">>!!>>!! get joinnnnn respose");
+
             let message = match message {
                 MessageType::NodeMessage(NodeMessage(msg_bytes)) => {
                     Message::from_bytes(Bytes::from(msg_bytes))?
@@ -530,6 +533,7 @@ impl<'a> MessageReceiver<'a> {
                 while let Some(event) = rx.recv().await {
                     match event {
                         ConnectionEvent::Received((src, bytes)) => {
+                            debug!(">>> in routing: msg receiveddd");
                             match WireMsg::deserialize(bytes) {
                                 Ok(message) => {
                                     return Some((message, src));

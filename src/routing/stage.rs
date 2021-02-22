@@ -73,16 +73,16 @@ impl Stage {
         //     )
         // };
 
-        async {
+        // async {
             trace!(?command);
 
             self.try_handle_command(command).await.map_err(|error| {
                 error!("Error encountered when handling command: {}", error);
                 error
             })
-        }
+        // }
         // .instrument(span)
-        .await
+        // .await
     }
 
     // Terminate this routing instance - cancel all scheduled timers including any future ones,
@@ -185,7 +185,7 @@ impl Stage {
         message: MessageType,
     ) -> Result<Vec<Command>> {
         let msg_bytes = message.serialize()?;
-
+        debug!(">> SEND MESSAGE");
         let cmds = match message {
             MessageType::Ping | MessageType::NodeMessage(_) => self
                 .comm
@@ -196,6 +196,7 @@ impl Stage {
                 .map(Command::HandlePeerLost)
                 .collect(),
             MessageType::ClientMessage(_) => {
+                debug!(">> CLIENT MESSAGE SENDING IN ROUTING {:?}", message);
                 for recipient in recipients {
                     if self
                         .comm

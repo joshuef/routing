@@ -379,7 +379,7 @@ async fn handle_connection_events(
     while let Some(event) = incoming_conns.recv().await {
         match event {
             ConnectionEvent::Received((src, bytes)) => {
-                trace!("New message ({} bytes) received from: {}", bytes.len(), src);
+                trace!(">>New message ({} bytes) received from: {}", bytes.len(), src);
                 handle_message(stage.clone(), bytes, src).await;
             }
             ConnectionEvent::Disconnected(addr) => {

@@ -72,7 +72,7 @@ impl Comm {
         let (endpoint, _incoming_connections, incoming_messages, disconnections, bootstrap_addr) =
             quic_p2p.bootstrap().await?;
 
-        let _ = task::spawn(handle_incoming_messages(
+        let _ = task::spawn(handle_incoming_messages_boot(
             incoming_messages,
             event_tx.clone(),
         ));
@@ -267,7 +267,33 @@ async fn handle_incoming_messages(
     mut event_tx: mpsc::Sender<ConnectionEvent>,
 ) {
     while let Some((src, msg)) = incoming_msgs.next().await {
-        let _ = event_tx.send(ConnectionEvent::Received((src, msg))).await;
+        debug!(">> INCOMING MSG BYTES??? ");
+        match event_tx.send(ConnectionEvent::Received((src, msg))).await { 
+            Ok(_) => {
+                debug!(">>!! bytes sent okay")
+            },
+            Err(error) => {
+                debug!(">>!! ERROR SENDING MESSAGE BYTES! {:?}", error)
+            }
+        }
+    }
+}
+
+
+async fn handle_incoming_messages_boot(
+    mut incoming_msgs: qp2p::IncomingMessages,
+    mut event_tx: mpsc::Sender<ConnectionEvent>,
+) {
+    while let Some((src, msg)) = incoming_msgs.next().await {
+        debug!(">> INCOMING MSG BYTES??? BOOT");
+        match event_tx.send(ConnectionEvent::Received((src, msg))).await { 
+            Ok(_) => {
+                debug!(">>!! bytes sent okay boot")
+            },
+            Err(error) => {
+                debug!(">>!! ERROR SENDING MESSAGE BYTES! boot {:?}", error)
+            }
+        }
     }
 }
 

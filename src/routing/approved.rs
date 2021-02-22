@@ -1965,6 +1965,7 @@ impl Approved {
             .promote_and_demote_elders(&self.node.name())
             .is_empty()
         {
+            error!("key status check failed, promote+demote empty, returning DkgInProgress");
             return Err(TargetSectionError::DkgInProgress);
         }
         if !self.section.chain().has_key(bls_pk) {
@@ -1983,6 +1984,8 @@ impl Approved {
                         .collect(),
                 }));
             } else {
+                error!("key status check failed, key not recognised, so returning DkgInProgress");
+
                 return Err(TargetSectionError::DkgInProgress);
             }
         }
