@@ -329,7 +329,10 @@ impl Approved {
                 }
 
                 let response =
-                    NetworkInfoMsg::BootstrapError(TargetSectionError::InvalidBootstrap);
+                    NetworkInfoMsg::BootstrapError(TargetSectionError::InvalidBootstrap(format!(
+                        "Failed to add enduser {} from {}",
+                        end_user, sender
+                    )));
                 debug!("Sending {:?} to {}", response, sender);
 
                 vec![Command::SendMessage {
