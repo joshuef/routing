@@ -428,10 +428,7 @@ async fn handle_message(stage: Arc<Stage>, bytes: Bytes, sender: SocketAddr) {
                         recipients: vec![sender],
                         delivery_group_size: 1,
                         message: MessageType::NetworkInfo(NetworkInfoMsg::BootstrapError(
-                            TargetSectionError::InvalidBootstrap(format!(
-                                "No enduser found for {} and msg {:?}",
-                                sender, message
-                            )),
+                            TargetSectionError::InvalidBootstrap,
                         )),
                     };
                     let _ = task::spawn(stage.handle_commands(command));
