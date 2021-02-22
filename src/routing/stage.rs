@@ -14,7 +14,7 @@ use tokio::{
     sync::{mpsc, watch, Mutex},
     time,
 };
-use tracing::Instrument;
+// use tracing::Instrument;
 
 // Node's current stage which is responsible
 // for accessing current info and trigger operations.
@@ -62,16 +62,16 @@ impl Stage {
         // Create a tracing span containing info about the current node. This is very useful when
         // analyzing logs produced by running multiple nodes within the same process, for example
         // from integration tests.
-        let span = {
-            let state = self.state.lock().await;
-            trace_span!(
-                "handle_command",
-                name = %state.node().name(),
-                prefix = format_args!("({:b})", state.section().prefix()),
-                age = state.node().age,
-                elder = state.is_elder(),
-            )
-        };
+        // let span = {
+        //     let state = self.state.lock().await;
+        //     trace_span!(
+        //         "handle_command",
+        //         name = %state.node().name(),
+        //         prefix = format_args!("({:b})", state.section().prefix()),
+        //         age = state.node().age,
+        //         elder = state.is_elder(),
+        //     )
+        // };
 
         async {
             trace!(?command);
@@ -81,7 +81,7 @@ impl Stage {
                 error
             })
         }
-        .instrument(span)
+        // .instrument(span)
         .await
     }
 
