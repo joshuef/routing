@@ -302,7 +302,7 @@ impl Routing {
         }
     }
 
-  /// Send a message.
+    /// Send a message.
     /// Messages sent here, either section to section or node to node are signed
     /// and validated upon receipt by routing itself.
     pub async fn send_message(
@@ -312,10 +312,19 @@ impl Routing {
         content: Bytes,
     ) -> Result<()> {
         if let DstLocation::EndUser(EndUser::Client { socket_id, .. }) = dst {
-            if let Some(socket_addr) = self.stage.state.lock().await.get_socket_addr(&socket_id) {
+            let mut socket= None;
+            {
+                if let Some(socket_addr) = self.stage.state.lock().await.get_socket_addr(&socket_id) {
+                    socket = Some(socket_addr.clone());
+                }
+                
+            }
+
+            if let Some(socket_addr) = socket {
                 return self
-                    .send_message_to_client(*socket_addr, ClientMessage::from(content)?)
+                    .send_message_to_client(socket_addr, ClientMessage::from(content)?)
                     .await;
+    
             }
         }
         let command = Command::SendUserMessage { src, dst, content };
