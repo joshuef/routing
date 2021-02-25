@@ -91,7 +91,7 @@ impl Approved {
         Ok(Self::new(node, section, Some(section_key_share), event_tx))
     }
 
-    pub fn section_chain(&self) -> SectionProofChain {
+    pub fn section_chain(&self) -> SectionChain {
         self.section.chain().clone()
     }
 
