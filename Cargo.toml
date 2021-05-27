@@ -24,7 +24,8 @@ rand = "~0.7.3"
 rand_chacha = "~0.2.2"
 resource_proof = "0.8.0"
 # sn_messaging = "25.1.0"
-sn_messaging = {path="../sn_messaging"}
+sn_messaging = {git="https://github.com/joshuef/sn_messaging", branch="BytesMut"}
+# sn_messaging = {path="../sn_messaging"}
 
 sn_data_types = "~0.18.3"
 thiserror = "1.0.23"
