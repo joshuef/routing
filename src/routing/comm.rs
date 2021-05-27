@@ -195,22 +195,23 @@ impl Comm {
         let delivery_group_size = delivery_group_size.min(recipients.len());
 
         let wire_msg = msg.to_wire_msg()?;
+        let bytes = wire_msg.serialize()?;
         // Run all the sends concurrently (using `FuturesUnordered`). If any of them fails, pick
         // the next recipient and try to send to them. Proceed until the needed number of sends
         // succeeds or if there are no more recipients to pick.
-        let send = |recipient: (XorName, SocketAddr), mut wire_msg: WireMsg| async move {
-            wire_msg.update_dest_info(None, Some(recipient.0));
-            match wire_msg.serialize() {
-                Ok(bytes) => {
+        let send = |recipient: (XorName, SocketAddr), bytes: Bytes| async move {
+            let updated_bytes = WireMsg::update_dest_info_on_bytes(bytes, &recipient.0);
+            // match wire_msg.serialize() {
+                // Ok(bytes) => {
                     trace!(
                         "Sending message ({} bytes) to {} of {:?}",
-                        bytes.len(),
+                        updated_bytes.len(),
                         delivery_group_size,
                         recipient.1
                     );
 
                     let result = self
-                        .send_to(&recipient.1, bytes)
+                        .send_to(&recipient.1, updated_bytes)
                         .await
                         .map_err(|err| match err {
                             qp2p::Error::Connection(qp2p::ConnectionError::LocallyClosed)
@@ -221,14 +222,14 @@ impl Comm {
                         });
 
                     (result, recipient.1)
-                }
-                Err(e) => (Err(Error::Messaging(e)), recipient.1),
-            }
+                // }
+                // Err(e) => (Err(Error::Messaging(e)), recipient.1),
+            // }
         };
 
         let mut tasks: FuturesUnordered<_> = recipients[0..delivery_group_size]
             .iter()
-            .map(|(name, recipient)| send((*name, *recipient), wire_msg.clone()))
+            .map(|(name, recipient)| send((*name, *recipient), bytes.clone()))
             .collect();
 
         let mut next = delivery_group_size;
@@ -247,7 +248,7 @@ impl Comm {
                     failed_recipients.push(addr);
 
                     if next < recipients.len() {
-                        tasks.push(send(recipients[next], wire_msg.clone()));
+                        tasks.push(send(recipients[next], bytes.clone()));
                         next += 1;
                     }
                 }
