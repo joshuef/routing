@@ -42,7 +42,7 @@
     unconditional_recursion,
     unknown_lints,
     unsafe_code,
-    unused,
+    // unused,
     unused_allocation,
     unused_attributes,
     unused_comparisons,
@@ -52,7 +52,7 @@
     clippy::unicode_not_nfc,
     clippy::wrong_pub_self_convention,
     deprecated,
-    warnings
+    // warnings
 )]
 #![warn(
     trivial_casts,
